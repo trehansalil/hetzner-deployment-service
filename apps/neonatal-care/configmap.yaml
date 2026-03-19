@@ -14,10 +14,10 @@ data:
   CLICKHOUSE_DB: "baby_tracker"
   CLICKHOUSE_USER: "clickhouse"
   MINIO_ENDPOINT: "neonatal-care-minio:9000"
-  MINIO_EXTERNAL_ENDPOINT: "YOUR_HETZNER_DOMAIN_OR_IP:9002"
+  MINIO_EXTERNAL_ENDPOINT: "neonate-logger.saliltrehan.com/minio"
   REDIS_URL: "redis://neonatal-care-redis:6379/0"
   N8N_HOST: "neonatal-care-n8n:5678"
-  WEBHOOK_URL: "https://YOUR_HETZNER_DOMAIN/automation/"
+  WEBHOOK_URL: "https://neonate-logger.saliltrehan.com/automation/"
   ENABLE_HTTPS: "false"          # TLS is terminated at the Ingress level in K8s
   ENABLE_BACKGROUND_NOTIFICATIONS: "false"
   EXTERNAL_TRANSCRIPTION_SERVICE_BOOL: "0"
@@ -36,7 +36,7 @@ data:
     # In K8s, TLS is terminated at the Ingress. Nginx here proxies internally over HTTP.
     server {
         listen 80;
-        server_name _;
+        server_name neonate-logger.saliltrehan.com;
 
         client_max_body_size 100m;
 

@@ -1,7 +1,5 @@
 # ClusterIssuer using Let's Encrypt (ACME HTTP-01 challenge)
 # Prerequisites: cert-manager must be installed and ingress-nginx running
-#
-# Replace YOUR_EMAIL_HERE with a real email for Let's Encrypt notifications.
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
 metadata:
@@ -9,7 +7,7 @@ metadata:
 spec:
   acme:
     server: https://acme-v02.api.letsencrypt.org/directory
-    email: trehansalil@yahoo.in
+    email: salil@saliltrehan.com
     privateKeySecretRef:
       name: letsencrypt-prod-key
     solvers:
@@ -25,7 +23,7 @@ metadata:
 spec:
   acme:
     server: https://acme-staging-v02.api.letsencrypt.org/directory
-    email: trehansalil@yahoo.in
+    email: salil@saliltrehan.com
     privateKeySecretRef:
       name: letsencrypt-staging-key
     solvers:

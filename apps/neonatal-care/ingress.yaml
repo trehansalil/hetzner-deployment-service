@@ -2,9 +2,7 @@
 # Prerequisites:
 #   1. ingress-nginx controller installed (cluster/ingress-nginx/)
 #   2. cert-manager installed + ClusterIssuer 'letsencrypt-prod' created
-#   3. DNS A record: YOUR_DOMAIN → Hetzner server IP
-#
-# Replace YOUR_DOMAIN with your actual domain (e.g. neonatal.example.com)
+#   3. DNS A record: neonate-logger.saliltrehan.com → Hetzner server IP
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -22,10 +20,10 @@ metadata:
 spec:
   tls:
   - hosts:
-    - YOUR_DOMAIN
+    - neonate-logger.saliltrehan.com
     secretName: neonatal-care-tls
   rules:
-  - host: YOUR_DOMAIN
+  - host: neonate-logger.saliltrehan.com
     http:
       paths:
       - path: /
