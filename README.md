@@ -21,10 +21,6 @@ hetzner-deployment-service/
 │       ├── ingress.yaml      # Ingress rules (TLS via cert-manager)
 │       └── jobs/
 │           └── init-clickhouse-job.yaml
-├── .github/
-│   └── workflows/
-│       ├── build-push.yml    # Runs in neonatal-care-repo: builds & pushes image
-│       └── deploy.yml        # Applies k8s manifests to Hetzner on image update
 ├── Makefile
 └── .gitignore
 ```

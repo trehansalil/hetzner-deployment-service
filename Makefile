@@ -29,7 +29,12 @@ rollout-neonatal:
 	$(KUBECTL) set image deployment/neonatal-care-backend \
 		neonatal-care-backend=$(IMAGE):$(IMAGE_TAG) \
 		-n $(NEONATAL_NS)
+	$(KUBECTL) set image deployment/neonatal-care-nginx \
+		copy-static=$(IMAGE):$(IMAGE_TAG) \
+		-n $(NEONATAL_NS)
+	$(KUBECTL) rollout restart deployment/neonatal-care-nginx -n $(NEONATAL_NS)
 	$(KUBECTL) rollout status deployment/neonatal-care-backend -n $(NEONATAL_NS)
+	$(KUBECTL) rollout status deployment/neonatal-care-nginx -n $(NEONATAL_NS)
 
 .PHONY: status-neonatal
 status-neonatal:

@@ -1,0 +1,76 @@
+# Deploy workflow — lives in hetzner-deployment-service
+# Triggered by:
+#   1. A repository_dispatch event from neonatal-care-repo after image push
+#   2. Manual workflow_dispatch for any app
+
+name: Deploy to Hetzner
+
+on:
+  repository_dispatch:
+    types:
+      - neonatal-care-image-updated
+  workflow_dispatch:
+    inputs:
+      app:
+        description: 'App to deploy'
+        required: true
+        default: 'neonatal-care'
+        type: choice
+        options:
+          - neonatal-care
+      image_tag:
+        description: 'Image tag (SHA or latest)'
+        required: false
+        default: 'latest'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.29.0'
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Determine app and image tag
+        id: vars
+        run: |
+          APP=${{ github.event.client_payload.app || github.event.inputs.app || 'neonatal-care' }}
+          TAG=${{ github.event.client_payload.image_tag || github.event.inputs.image_tag || 'latest' }}
+          echo "app=$APP" >> $GITHUB_OUTPUT
+          echo "image_tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Apply k8s manifests
+        run: |
+          kubectl apply -f apps/${{ steps.vars.outputs.app }}/namespace.yaml
+          kubectl apply -f apps/${{ steps.vars.outputs.app }}/configmap.yaml -n ${{ steps.vars.outputs.app }}
+          kubectl apply -f apps/${{ steps.vars.outputs.app }}/pvc.yaml -n ${{ steps.vars.outputs.app }}
+          kubectl apply -f apps/${{ steps.vars.outputs.app }}/deployment.yaml -n ${{ steps.vars.outputs.app }}
+          kubectl apply -f apps/${{ steps.vars.outputs.app }}/service.yaml -n ${{ steps.vars.outputs.app }}
+          kubectl apply -f apps/${{ steps.vars.outputs.app }}/ingress.yaml -n ${{ steps.vars.outputs.app }}
+
+      - name: Update image tag (rolling deploy)
+        if: steps.vars.outputs.app == 'neonatal-care'
+        run: |
+          kubectl set image deployment/neonatal-care-backend \
+            neonatal-care-backend=ghcr.io/trehansalil/neonatal-care:${{ steps.vars.outputs.image_tag }} \
+            -n neonatal-care
+          kubectl set image deployment/neonatal-care-nginx \
+            copy-static=ghcr.io/trehansalil/neonatal-care:${{ steps.vars.outputs.image_tag }} \
+            -n neonatal-care
+          kubectl rollout restart deployment/neonatal-care-nginx -n neonatal-care
+          kubectl rollout status deployment/neonatal-care-backend -n neonatal-care --timeout=300s
+          kubectl rollout status deployment/neonatal-care-nginx -n neonatal-care --timeout=120s
+
+      - name: Verify deployment
+        run: |
+          kubectl get pods -n ${{ steps.vars.outputs.app }}
