@@ -18,6 +18,7 @@ cluster-init:
 	@echo "Waiting for cert-manager to be ready..."
 	$(KUBECTL) wait --for=condition=ready pod -l app.kubernetes.io/instance=cert-manager -n cert-manager --timeout=120s
 	$(KUBECTL) apply -f cluster/cert-manager/cluster-issuer.yaml
+	$(KUBECTL) apply -f cluster/traefik-config.yaml
 	@echo "Cluster bootstrap complete."
 
 # ─── Neonatal Care App ────────────────────────────────────────────────────────
