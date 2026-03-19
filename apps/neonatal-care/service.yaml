@@ -1,0 +1,86 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: neonatal-care-clickhouse
+  namespace: neonatal-care
+spec:
+  selector:
+    app: neonatal-care-clickhouse
+  ports:
+  - name: http
+    port: 8123
+    targetPort: 8123
+  - name: native
+    port: 9000
+    targetPort: 9000
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: neonatal-care-minio
+  namespace: neonatal-care
+spec:
+  selector:
+    app: neonatal-care-minio
+  ports:
+  - name: api
+    port: 9000
+    targetPort: 9000
+  - name: console
+    port: 9001
+    targetPort: 9001
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: neonatal-care-redis
+  namespace: neonatal-care
+spec:
+  selector:
+    app: neonatal-care-redis
+  ports:
+  - port: 6379
+    targetPort: 6379
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: neonatal-care-n8n
+  namespace: neonatal-care
+spec:
+  selector:
+    app: neonatal-care-n8n
+  ports:
+  - port: 5678
+    targetPort: 5678
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: neonatal-care-backend
+  namespace: neonatal-care
+spec:
+  selector:
+    app: neonatal-care-backend
+  ports:
+  - port: 5000
+    targetPort: 5000
+  type: ClusterIP
+---
+# Nginx is the only service exposed externally (via Ingress)
+apiVersion: v1
+kind: Service
+metadata:
+  name: neonatal-care-nginx
+  namespace: neonatal-care
+spec:
+  selector:
+    app: neonatal-care-nginx
+  ports:
+  - port: 80
+    targetPort: 80
+  type: ClusterIP

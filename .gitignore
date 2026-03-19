@@ -1,0 +1,20 @@
+# Secret files — never commit
+apps/**/secret.yaml
+*.pem
+*.key
+*.crt
+.env
+.env.*
+!.env.example
+
+# kubeconfig
+kubeconfig
+*.kubeconfig
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/

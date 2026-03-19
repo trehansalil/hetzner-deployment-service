@@ -1,0 +1,102 @@
+# Non-secret environment configuration for the neonatal-care app.
+# Secrets (passwords, API keys) go in secret.yaml (gitignored).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: neonatal-care-config
+  namespace: neonatal-care
+data:
+  TZ: "Asia/Kolkata"
+  DB_HOST: "neonatal-care-clickhouse"
+  DB_NAME: "baby_tracker"
+  DB_USER: "clickhouse"
+  DB_PORT: "8123"
+  CLICKHOUSE_DB: "baby_tracker"
+  CLICKHOUSE_USER: "clickhouse"
+  MINIO_ENDPOINT: "neonatal-care-minio:9000"
+  MINIO_EXTERNAL_ENDPOINT: "YOUR_HETZNER_DOMAIN_OR_IP:9002"
+  REDIS_URL: "redis://neonatal-care-redis:6379/0"
+  N8N_HOST: "neonatal-care-n8n:5678"
+  WEBHOOK_URL: "https://YOUR_HETZNER_DOMAIN/automation/"
+  ENABLE_HTTPS: "false"          # TLS is terminated at the Ingress level in K8s
+  ENABLE_BACKGROUND_NOTIFICATIONS: "false"
+  EXTERNAL_TRANSCRIPTION_SERVICE_BOOL: "0"
+  DIAPER_ALERT_HOURS: "4"
+  NOTIFICATION_CHECK_INTERVAL_MINUTES: "60"
+  AZURE_OPENAI_API_VERSION: "2024-02-01"
+---
+# Nginx config as a ConfigMap — mounted into the nginx container
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: neonatal-care-nginx-config
+  namespace: neonatal-care
+data:
+  default.conf: |
+    # In K8s, TLS is terminated at the Ingress. Nginx here proxies internally over HTTP.
+    server {
+        listen 80;
+        server_name _;
+
+        client_max_body_size 100m;
+
+        root /usr/share/nginx/html;
+        index index.html;
+
+        location / {
+            try_files $uri $uri/ @backend;
+        }
+
+        location /api/ {
+            proxy_pass http://neonatal-care-backend:5000/api/;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_read_timeout 300s;
+            proxy_buffering off;
+            # Required for SSE (Server-Sent Events)
+            add_header X-Accel-Buffering no;
+        }
+
+        location @backend {
+            proxy_pass http://neonatal-care-backend:5000;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+
+        location /minio/ {
+            proxy_pass http://neonatal-care-minio:9000/;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+        }
+
+        location /minio-console/ {
+            proxy_pass http://neonatal-care-minio:9001/;
+            proxy_set_header Host $host;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            sub_filter 'href="/' 'href="/minio-console/';
+            sub_filter 'src="/' 'src="/minio-console/';
+            sub_filter_once off;
+        }
+
+        location /automation/ {
+            proxy_pass http://neonatal-care-n8n:5678/;
+            proxy_set_header Host $host;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            sub_filter 'href="/' 'href="/automation/';
+            sub_filter 'src="/' 'src="/automation/';
+            sub_filter_once off;
+            sub_filter_types text/html text/css text/javascript application/javascript application/json;
+        }
+
+        location = /automation {
+            return 301 $scheme://$host/automation/;
+        }
+    }

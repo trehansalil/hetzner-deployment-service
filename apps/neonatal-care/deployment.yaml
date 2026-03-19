@@ -1,0 +1,332 @@
+# ─── ClickHouse ───────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: neonatal-care-clickhouse
+  namespace: neonatal-care
+  labels:
+    app: neonatal-care-clickhouse
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: neonatal-care-clickhouse
+  template:
+    metadata:
+      labels:
+        app: neonatal-care-clickhouse
+    spec:
+      containers:
+      - name: clickhouse
+        image: clickhouse/clickhouse-server:latest
+        ports:
+        - containerPort: 8123
+        - containerPort: 9000
+        env:
+        - name: CLICKHOUSE_DB
+          valueFrom:
+            configMapKeyRef:
+              name: neonatal-care-config
+              key: CLICKHOUSE_DB
+        - name: CLICKHOUSE_USER
+          valueFrom:
+            configMapKeyRef:
+              name: neonatal-care-config
+              key: CLICKHOUSE_USER
+        - name: CLICKHOUSE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: neonatal-care-secrets
+              key: CLICKHOUSE_PASSWORD
+        - name: CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT
+          value: "1"
+        volumeMounts:
+        - name: clickhouse-data
+          mountPath: /var/lib/clickhouse
+        - name: clickhouse-logs
+          mountPath: /var/log/clickhouse-server
+        livenessProbe:
+          httpGet:
+            path: /ping
+            port: 8123
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /ping
+            port: 8123
+          initialDelaySeconds: 15
+          periodSeconds: 5
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+      volumes:
+      - name: clickhouse-data
+        persistentVolumeClaim:
+          claimName: clickhouse-data
+      - name: clickhouse-logs
+        persistentVolumeClaim:
+          claimName: clickhouse-logs
+---
+# ─── MinIO ────────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: neonatal-care-minio
+  namespace: neonatal-care
+  labels:
+    app: neonatal-care-minio
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: neonatal-care-minio
+  template:
+    metadata:
+      labels:
+        app: neonatal-care-minio
+    spec:
+      containers:
+      - name: minio
+        image: minio/minio:latest
+        args: ["server", "/data", "--console-address", ":9001"]
+        ports:
+        - containerPort: 9000
+        - containerPort: 9001
+        env:
+        - name: MINIO_ROOT_USER
+          valueFrom:
+            secretKeyRef:
+              name: neonatal-care-secrets
+              key: MINIO_ROOT_USER
+        - name: MINIO_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: neonatal-care-secrets
+              key: MINIO_ROOT_PASSWORD
+        - name: MINIO_API_CORS_ALLOW_ORIGIN
+          value: "*"
+        volumeMounts:
+        - name: minio-data
+          mountPath: /data
+        livenessProbe:
+          httpGet:
+            path: /minio/health/live
+            port: 9000
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /minio/health/live
+            port: 9000
+          initialDelaySeconds: 15
+          periodSeconds: 10
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+      volumes:
+      - name: minio-data
+        persistentVolumeClaim:
+          claimName: minio-data
+---
+# ─── Redis ────────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: neonatal-care-redis
+  namespace: neonatal-care
+  labels:
+    app: neonatal-care-redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: neonatal-care-redis
+  template:
+    metadata:
+      labels:
+        app: neonatal-care-redis
+    spec:
+      containers:
+      - name: redis
+        image: redis:7-alpine
+        ports:
+        - containerPort: 6379
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "50m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+---
+# ─── n8n ──────────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: neonatal-care-n8n
+  namespace: neonatal-care
+  labels:
+    app: neonatal-care-n8n
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: neonatal-care-n8n
+  template:
+    metadata:
+      labels:
+        app: neonatal-care-n8n
+    spec:
+      containers:
+      - name: n8n
+        image: n8nio/n8n:latest
+        ports:
+        - containerPort: 5678
+        env:
+        - name: WEBHOOK_URL
+          valueFrom:
+            configMapKeyRef:
+              name: neonatal-care-config
+              key: WEBHOOK_URL
+        - name: N8N_HOST
+          value: "0.0.0.0"
+        - name: N8N_PORT
+          value: "5678"
+        - name: N8N_PROTOCOL
+          value: "http"
+        - name: N8N_PATH
+          value: "/automation/"
+        - name: N8N_SECURE_COOKIE
+          value: "false"
+        volumeMounts:
+        - name: n8n-data
+          mountPath: /home/node/.n8n
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+      volumes:
+      - name: n8n-data
+        persistentVolumeClaim:
+          claimName: n8n-data
+---
+# ─── Flask Backend ────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: neonatal-care-backend
+  namespace: neonatal-care
+  labels:
+    app: neonatal-care-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: neonatal-care-backend
+  template:
+    metadata:
+      labels:
+        app: neonatal-care-backend
+    spec:
+      containers:
+      - name: neonatal-care-backend
+        # Updated by CI/CD: ghcr.io/trehansalil/neonatal-care:<sha>
+        image: ghcr.io/trehansalil/neonatal-care:latest
+        command:
+          - uv
+          - run
+          - gunicorn
+          - --workers=4
+          - --worker-class=gevent
+          - --worker-connections=1000
+          - --bind=0.0.0.0:5000
+          - --timeout=300
+          - app:app
+        ports:
+        - containerPort: 5000
+        envFrom:
+        - configMapRef:
+            name: neonatal-care-config
+        - secretRef:
+            name: neonatal-care-secrets
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: 5000
+          initialDelaySeconds: 30
+          periodSeconds: 15
+        readinessProbe:
+          httpGet:
+            path: /api/health
+            port: 5000
+          initialDelaySeconds: 15
+          periodSeconds: 5
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "200m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+---
+# ─── Nginx (static files + reverse proxy) ─────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: neonatal-care-nginx
+  namespace: neonatal-care
+  labels:
+    app: neonatal-care-nginx
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: neonatal-care-nginx
+  template:
+    metadata:
+      labels:
+        app: neonatal-care-nginx
+    spec:
+      initContainers:
+      # Copy static HTML files from the backend image into a shared volume
+      - name: copy-static
+        image: ghcr.io/trehansalil/neonatal-care:latest
+        command: ["sh", "-c", "cp -r /app/html/. /static/"]
+        volumeMounts:
+        - name: static-files
+          mountPath: /static
+      containers:
+      - name: nginx
+        image: nginx:1.25
+        ports:
+        - containerPort: 80
+        volumeMounts:
+        - name: nginx-config
+          mountPath: /etc/nginx/conf.d
+        - name: static-files
+          mountPath: /usr/share/nginx/html
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "50m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+      volumes:
+      - name: nginx-config
+        configMap:
+          name: neonatal-care-nginx-config
+      - name: static-files
+        emptyDir: {}

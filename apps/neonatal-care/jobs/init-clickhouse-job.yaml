@@ -1,0 +1,62 @@
+# One-time K8s Job to initialize the ClickHouse schema.
+# Run after ClickHouse pod is healthy:
+#   make init-clickhouse
+#
+# The schema is embedded directly here (sourced from init_clickhouse.sql in neonatal-care-repo).
+# Update this if the schema changes.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: init-clickhouse
+  namespace: neonatal-care
+  labels:
+    app: neonatal-care
+    job-type: db-init
+spec:
+  ttlSecondsAfterFinished: 300   # auto-cleanup after 5 min
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+      - name: init-clickhouse
+        image: clickhouse/clickhouse-client:latest
+        command:
+          - sh
+          - -c
+          - |
+            clickhouse-client \
+              --host neonatal-care-clickhouse \
+              --port 9000 \
+              --user $(CLICKHOUSE_USER) \
+              --password $(CLICKHOUSE_PASSWORD) \
+              --database $(CLICKHOUSE_DB) \
+              --multiquery < /sql/init_clickhouse.sql
+        env:
+        - name: CLICKHOUSE_USER
+          valueFrom:
+            configMapKeyRef:
+              name: neonatal-care-config
+              key: CLICKHOUSE_USER
+        - name: CLICKHOUSE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: neonatal-care-secrets
+              key: CLICKHOUSE_PASSWORD
+        - name: CLICKHOUSE_DB
+          valueFrom:
+            configMapKeyRef:
+              name: neonatal-care-config
+              key: CLICKHOUSE_DB
+        volumeMounts:
+        - name: sql-scripts
+          mountPath: /sql
+      volumes:
+      - name: sql-scripts
+        configMap:
+          name: neonatal-care-sql-init
+---
+# Mount the init SQL as a ConfigMap
+# To populate: kubectl create configmap neonatal-care-sql-init \
+#   --from-file=init_clickhouse.sql=<path-to-file> -n neonatal-care
+# Or apply the ConfigMap manually before running this job.

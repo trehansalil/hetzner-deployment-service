@@ -1,0 +1,15 @@
+# cert-manager for automatic TLS via Let's Encrypt
+# Source: https://github.com/cert-manager/cert-manager/releases/download/v1.14.5/cert-manager.yaml
+#
+# Apply with:
+#   kubectl apply -f cluster/cert-manager/install.yaml
+#
+# After applying, create a ClusterIssuer:
+#   kubectl apply -f cluster/cert-manager/cluster-issuer.yaml
+#
+# To download the actual manifest:
+#   curl -o cluster/cert-manager/install.yaml \
+#     https://github.com/cert-manager/cert-manager/releases/download/v1.14.5/cert-manager.yaml
+#
+# Pinned version: v1.14.5
+# See: https://cert-manager.io/docs/installation/

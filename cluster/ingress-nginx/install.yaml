@@ -1,0 +1,19 @@
+# Nginx Ingress Controller for bare-metal / self-hosted clusters
+# Source: https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.10.1/deploy/static/provider/baremetal/deploy.yaml
+#
+# For Hetzner, use NodePort (baremetal) variant — NOT LoadBalancer.
+# Apply with:
+#   kubectl apply -f cluster/ingress-nginx/install.yaml
+#
+# After applying, get the NodePort:
+#   kubectl get svc ingress-nginx-controller -n ingress-nginx
+# Then point your Hetzner firewall / DNS to that port.
+#
+# To use a specific pinned version, replace the URL below and re-download.
+# This file is a reference placeholder — download the actual manifest at deploy time:
+#
+#   curl -o cluster/ingress-nginx/install.yaml \
+#     https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.10.1/deploy/static/provider/baremetal/deploy.yaml
+#
+# Pinned version: controller-v1.10.1
+# See: https://github.com/kubernetes/ingress-nginx/releases

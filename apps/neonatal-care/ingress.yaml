@@ -1,0 +1,37 @@
+# Ingress with TLS via cert-manager (Let's Encrypt)
+# Prerequisites:
+#   1. ingress-nginx controller installed (cluster/ingress-nginx/)
+#   2. cert-manager installed + ClusterIssuer 'letsencrypt-prod' created
+#   3. DNS A record: YOUR_DOMAIN → Hetzner server IP
+#
+# Replace YOUR_DOMAIN with your actual domain (e.g. neonatal.example.com)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: neonatal-care-ingress
+  namespace: neonatal-care
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    # Required for SSE (Server-Sent Events) to work through ingress
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+spec:
+  tls:
+  - hosts:
+    - YOUR_DOMAIN
+    secretName: neonatal-care-tls
+  rules:
+  - host: YOUR_DOMAIN
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: neonatal-care-nginx
+            port:
+              number: 80
