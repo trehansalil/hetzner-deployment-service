@@ -5,12 +5,20 @@ IMAGE := ghcr.io/trehansalil/neonatal-care
 
 # ─── Cluster Bootstrap ────────────────────────────────────────────────────────
 
+INGRESS_NGINX_VERSION := controller-v1.10.1
+CERT_MANAGER_VERSION := v1.14.5
+
 .PHONY: cluster-init
 cluster-init:
 	$(KUBECTL) apply -f cluster/namespaces.yaml
-	$(KUBECTL) apply -f cluster/ingress-nginx/
-	$(KUBECTL) apply -f cluster/cert-manager/
-	@echo "Cluster bootstrap complete. Wait ~60s for ingress-nginx pods to be ready."
+	$(KUBECTL) apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/$(INGRESS_NGINX_VERSION)/deploy/static/provider/baremetal/deploy.yaml
+	@echo "Waiting for ingress-nginx controller to be ready..."
+	$(KUBECTL) wait --for=condition=ready pod -l app.kubernetes.io/component=controller -n ingress-nginx --timeout=120s
+	$(KUBECTL) apply -f https://github.com/cert-manager/cert-manager/releases/download/$(CERT_MANAGER_VERSION)/cert-manager.yaml
+	@echo "Waiting for cert-manager to be ready..."
+	$(KUBECTL) wait --for=condition=ready pod -l app.kubernetes.io/instance=cert-manager -n cert-manager --timeout=120s
+	$(KUBECTL) apply -f cluster/cert-manager/cluster-issuer.yaml
+	@echo "Cluster bootstrap complete."
 
 # ─── Neonatal Care App ────────────────────────────────────────────────────────
 
