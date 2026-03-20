@@ -75,6 +75,13 @@ jobs:
           kubectl apply -f apps/airline-hr-chatbot/daemonset.yaml -n hr-chatbot
           kubectl apply -f apps/airline-hr-chatbot/service.yaml -n hr-chatbot
           kubectl apply -f apps/airline-hr-chatbot/ingress.yaml -n hr-chatbot
+          kubectl apply -f apps/airline-hr-chatbot/cronjob-pod-cleanup.yaml -n hr-chatbot
+
+      - name: Post-deploy pod cleanup — airline-hr-chatbot
+        if: steps.vars.outputs.app == 'airline-hr-chatbot'
+        run: |
+          kubectl delete pods -n hr-chatbot --field-selector=status.phase==Failed --ignore-not-found || true
+          kubectl delete pods -n hr-chatbot --field-selector=status.phase==Succeeded --ignore-not-found || true
 
       - name: Update image tag (rolling deploy) — neonatal-care
         if: steps.vars.outputs.app == 'neonatal-care'

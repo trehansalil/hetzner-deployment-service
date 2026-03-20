@@ -105,6 +105,7 @@ deploy-hr:
 	$(KUBECTL) apply -f apps/airline-hr-chatbot/daemonset.yaml -n $(HR_NS)
 	$(KUBECTL) apply -f apps/airline-hr-chatbot/service.yaml -n $(HR_NS)
 	$(KUBECTL) apply -f apps/airline-hr-chatbot/ingress.yaml -n $(HR_NS)
+	$(KUBECTL) apply -f apps/airline-hr-chatbot/cronjob-pod-cleanup.yaml -n $(HR_NS)
 
 .PHONY: rollout-hr
 rollout-hr:
@@ -128,6 +129,15 @@ logs-hr:
 .PHONY: rollback-hr
 rollback-hr:
 	$(KUBECTL) rollout undo deployment/app -n $(HR_NS)
+
+.PHONY: clean-pods-hr
+clean-pods-hr:
+	@echo "Deleting Failed/Evicted pods in $(HR_NS)..."
+	$(KUBECTL) delete pods -n $(HR_NS) --field-selector=status.phase==Failed --ignore-not-found
+	@echo "Deleting Succeeded pods in $(HR_NS)..."
+	$(KUBECTL) delete pods -n $(HR_NS) --field-selector=status.phase==Succeeded --ignore-not-found
+	@echo "Current pods:"
+	$(KUBECTL) get pods -n $(HR_NS)
 
 .PHONY: ghcr-secret-hr
 ghcr-secret-hr:
