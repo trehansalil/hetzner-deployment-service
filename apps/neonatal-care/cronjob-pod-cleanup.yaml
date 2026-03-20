@@ -51,7 +51,7 @@ spec:
           restartPolicy: OnFailure
           containers:
           - name: kubectl
-            image: bitnami/kubectl:1.29
+            image: alpine/k8s:1.29.7
             resources:
               requests:
                 memory: "32Mi"
@@ -74,7 +74,7 @@ spec:
               if [ -n "$FAILED" ]; then
                 echo "Deleting failed/evicted pods: $FAILED"
                 echo "$FAILED" | tr ' ' '\n' | \
-                  xargs -r kubectl delete pod -n "$NS" --ignore-not-found
+                  xargs kubectl delete pod -n "$NS" --ignore-not-found
               else
                 echo "No failed/evicted pods found."
               fi
@@ -86,7 +86,7 @@ spec:
               if [ -n "$SUCCEEDED" ]; then
                 echo "Deleting succeeded pods: $SUCCEEDED"
                 echo "$SUCCEEDED" | tr ' ' '\n' | \
-                  xargs -r kubectl delete pod -n "$NS" --ignore-not-found
+                  xargs kubectl delete pod -n "$NS" --ignore-not-found
               else
                 echo "No succeeded pods found."
               fi
