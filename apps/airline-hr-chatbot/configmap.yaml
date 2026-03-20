@@ -369,7 +369,7 @@ data:
             replacement: /var/log/pods/*$1/*.log
 
         pipeline_stages:
-          - docker: {}
+          - cri: {}
           - json:
               expressions:
                 level:     level
