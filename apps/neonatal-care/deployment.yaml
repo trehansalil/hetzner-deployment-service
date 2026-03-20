@@ -8,6 +8,8 @@ metadata:
     app: neonatal-care-clickhouse
 spec:
   replicas: 1
+  strategy:
+    type: Recreate    # PVC-backed with file locks — cannot run two pods simultaneously
   selector:
     matchLabels:
       app: neonatal-care-clickhouse
@@ -82,6 +84,8 @@ metadata:
     app: neonatal-care-minio
 spec:
   replicas: 1
+  strategy:
+    type: Recreate    # PVC-backed with file locks — cannot run two pods simultaneously
   selector:
     matchLabels:
       app: neonatal-care-minio
@@ -178,6 +182,8 @@ metadata:
     app: neonatal-care-n8n
 spec:
   replicas: 1
+  strategy:
+    type: Recreate    # PVC-backed (SQLite) with file locks — cannot run two pods simultaneously
   selector:
     matchLabels:
       app: neonatal-care-n8n
