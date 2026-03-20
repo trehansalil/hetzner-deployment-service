@@ -1,0 +1,1120 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init-sql
+  namespace: hr-chatbot
+data:
+  # Mounted at /docker-entrypoint-initdb.d/init.sql via subPath.
+  # The pgvector/pgvector:pg16 entrypoint runs this automatically on first start
+  # (when PGDATA is empty). All statements are idempotent — safe to re-run.
+  init.sql: |
+    -- =============================================================================
+    -- init.sql — Canonical bootstrap script for the Flydubai HR Chatbot database.
+    -- =============================================================================
+
+    -- EXTENSIONS
+    CREATE EXTENSION IF NOT EXISTS vector;
+    CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
+    -- SHARED HELPERS
+    CREATE OR REPLACE FUNCTION keywords_to_text(TEXT[]) RETURNS TEXT
+        AS $$ SELECT array_to_string($1, ' ') $$
+        LANGUAGE SQL IMMUTABLE;
+
+    -- KNOWLEDGE BASE
+    CREATE TABLE IF NOT EXISTS knowledge_embeddings (
+        id             BIGSERIAL    PRIMARY KEY,
+        content        TEXT         NOT NULL,
+        source         TEXT         NOT NULL,
+        page           INTEGER,
+        chunk_index    INTEGER      NOT NULL DEFAULT 0,
+        file_hash      TEXT         NOT NULL,
+        chunk_keywords TEXT[]       NOT NULL DEFAULT '{}',
+        metadata       JSONB        NOT NULL DEFAULT '{}',
+        embedding      vector(2000) NOT NULL,
+        created_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_knowledge_embeddings_hnsw
+        ON knowledge_embeddings
+        USING hnsw (embedding vector_cosine_ops)
+        WITH (m = 16, ef_construction = 64);
+
+    CREATE INDEX IF NOT EXISTS idx_knowledge_embeddings_source
+        ON knowledge_embeddings (source);
+
+    CREATE INDEX IF NOT EXISTS idx_knowledge_embeddings_file_hash
+        ON knowledge_embeddings (file_hash);
+
+    CREATE INDEX IF NOT EXISTS idx_knowledge_chunk_keywords_gin
+        ON knowledge_embeddings USING GIN (chunk_keywords);
+
+    CREATE INDEX IF NOT EXISTS idx_knowledge_chunk_keywords_trgm
+        ON knowledge_embeddings USING GIN (keywords_to_text(chunk_keywords) gin_trgm_ops);
+
+    UPDATE knowledge_embeddings
+    SET chunk_keywords = ARRAY(
+        SELECT jsonb_array_elements_text(metadata->'chunk_keywords')
+    )
+    WHERE metadata ? 'chunk_keywords'
+      AND chunk_keywords = '{}';
+
+    -- SESSION EMBEDDINGS
+    CREATE TABLE IF NOT EXISTS session_embeddings (
+        id            BIGSERIAL    PRIMARY KEY,
+        content       TEXT         NOT NULL,
+        source        TEXT         NOT NULL,
+        page          INTEGER,
+        chunk_index   INTEGER      NOT NULL DEFAULT 0,
+        user_id       TEXT         NOT NULL,
+        session_id    TEXT         NOT NULL,
+        file_hash     TEXT         NOT NULL,
+        chunk_keywords TEXT[]      NOT NULL DEFAULT '{}',
+        metadata      JSONB        NOT NULL DEFAULT '{}',
+        embedding     vector(2000) NOT NULL,
+        created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_session_embeddings_session_id
+        ON session_embeddings (session_id);
+
+    CREATE INDEX IF NOT EXISTS idx_session_embeddings_user_id
+        ON session_embeddings (user_id);
+
+    CREATE INDEX IF NOT EXISTS idx_session_embeddings_file_hash
+        ON session_embeddings (file_hash);
+
+    CREATE INDEX IF NOT EXISTS idx_session_embeddings_hnsw
+        ON session_embeddings
+        USING hnsw (embedding vector_cosine_ops)
+        WITH (m = 16, ef_construction = 64);
+
+    CREATE INDEX IF NOT EXISTS idx_session_chunk_keywords_gin
+        ON session_embeddings USING GIN (chunk_keywords);
+
+    CREATE INDEX IF NOT EXISTS idx_session_chunk_keywords_trgm
+        ON session_embeddings USING GIN (keywords_to_text(chunk_keywords) gin_trgm_ops);
+
+    UPDATE session_embeddings
+    SET chunk_keywords = ARRAY(
+        SELECT jsonb_array_elements_text(metadata->'chunk_keywords')
+    )
+    WHERE metadata ? 'chunk_keywords'
+      AND chunk_keywords = '{}';
+
+    -- SESSION DOCUMENT LINKS
+    CREATE TABLE IF NOT EXISTS session_document_links (
+        id          BIGSERIAL   PRIMARY KEY,
+        file_hash   TEXT        NOT NULL,
+        user_id     TEXT        NOT NULL,
+        session_id  TEXT        NOT NULL,
+        linked_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CONSTRAINT uq_session_document_links UNIQUE (file_hash, user_id, session_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_session_document_links_session
+        ON session_document_links (session_id, user_id);
+
+    CREATE INDEX IF NOT EXISTS idx_session_document_links_hash
+        ON session_document_links (file_hash, user_id);
+
+    -- SESSION TABULAR FILES
+    CREATE TABLE IF NOT EXISTS session_tabular_files (
+        id              BIGSERIAL    PRIMARY KEY,
+        session_id      TEXT         NOT NULL,
+        user_id         TEXT         NOT NULL,
+        file_name       TEXT         NOT NULL,
+        file_hash       TEXT         NOT NULL,
+        file_type       TEXT         NOT NULL,
+        context_params  JSONB        NOT NULL DEFAULT '{}',
+        df_rows_json    JSONB,
+        embedding       vector(2000) NOT NULL,
+        uploaded_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+        CONSTRAINT uq_session_tabular_files UNIQUE (file_hash, user_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_session_tabular_files_session
+        ON session_tabular_files (session_id, user_id);
+
+    CREATE INDEX IF NOT EXISTS idx_session_tabular_files_hash
+        ON session_tabular_files (file_hash, user_id);
+
+    CREATE INDEX IF NOT EXISTS idx_session_tabular_files_hnsw
+        ON session_tabular_files
+        USING hnsw (embedding vector_cosine_ops)
+        WITH (m = 16, ef_construction = 64);
+
+    -- KNOWLEDGE TABULAR FILES
+    CREATE TABLE IF NOT EXISTS knowledge_tabular_files (
+        id              BIGSERIAL    PRIMARY KEY,
+        file_name       TEXT         NOT NULL,
+        file_hash       TEXT         NOT NULL UNIQUE,
+        file_type       TEXT         NOT NULL,
+        context_params  JSONB        NOT NULL DEFAULT '{}',
+        df_rows_json    JSONB,
+        embedding       vector(2000) NOT NULL,
+        created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_knowledge_tabular_files_hash
+        ON knowledge_tabular_files (file_hash);
+
+    CREATE INDEX IF NOT EXISTS idx_knowledge_tabular_files_hnsw
+        ON knowledge_tabular_files
+        USING hnsw (embedding vector_cosine_ops)
+        WITH (m = 16, ef_construction = 64);
+
+    -- CHAINLIT PERSISTENCE TABLES
+    CREATE TABLE IF NOT EXISTS "User" (
+        "id"         UUID        PRIMARY KEY,
+        "identifier" TEXT        NOT NULL UNIQUE,
+        "metadata"   JSONB       NOT NULL DEFAULT '{}',
+        "createdAt"  TIMESTAMPTZ,
+        "updatedAt"  TIMESTAMPTZ
+    );
+
+    CREATE TABLE IF NOT EXISTS "Thread" (
+        "id"             UUID        PRIMARY KEY,
+        "createdAt"      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        "name"           TEXT,
+        "userId"         UUID        REFERENCES "User"("id") ON DELETE SET NULL,
+        "userIdentifier" TEXT,
+        "tags"           TEXT[],
+        "metadata"       JSONB       NOT NULL DEFAULT '{}',
+        "updatedAt"      TIMESTAMPTZ,
+        "deletedAt"      TIMESTAMPTZ
+    );
+
+    CREATE TABLE IF NOT EXISTS "Step" (
+        "id"         UUID        PRIMARY KEY,
+        "threadId"   UUID        REFERENCES "Thread"("id") ON DELETE CASCADE,
+        "parentId"   UUID,
+        "input"      TEXT,
+        "metadata"   JSONB       NOT NULL DEFAULT '{}',
+        "name"       TEXT,
+        "output"     TEXT,
+        "type"       TEXT        NOT NULL,
+        "startTime"  TIMESTAMPTZ,
+        "endTime"    TIMESTAMPTZ,
+        "showInput"  TEXT,
+        "isError"    BOOLEAN     NOT NULL DEFAULT FALSE
+    );
+
+    CREATE TABLE IF NOT EXISTS "Element" (
+        "id"          UUID    PRIMARY KEY,
+        "threadId"    UUID    REFERENCES "Thread"("id") ON DELETE CASCADE,
+        "stepId"      UUID    REFERENCES "Step"("id")   ON DELETE CASCADE,
+        "metadata"    JSONB   NOT NULL DEFAULT '{}',
+        "mime"        TEXT,
+        "name"        TEXT    NOT NULL,
+        "objectKey"   TEXT,
+        "url"         TEXT,
+        "chainlitKey" TEXT,
+        "display"     TEXT,
+        "size"        TEXT,
+        "language"    TEXT,
+        "page"        INT,
+        "props"       JSONB   NOT NULL DEFAULT '{}'
+    );
+
+    CREATE TABLE IF NOT EXISTS "Feedback" (
+        "id"      UUID  PRIMARY KEY,
+        "stepId"  UUID  NOT NULL REFERENCES "Step"("id") ON DELETE CASCADE,
+        "name"    TEXT  NOT NULL DEFAULT 'user_feedback',
+        "value"   FLOAT NOT NULL,
+        "comment" TEXT
+    );
+
+    -- SEED DATA
+    INSERT INTO "User" ("id", "identifier", "metadata", "createdAt")
+    VALUES
+        (gen_random_uuid(), 'EMP001',
+         '{"name": "Demo User",     "dept": "HR",               "grade": "Manager"}'::jsonb,
+         NOW()),
+        (gen_random_uuid(), 'EMP002',
+         '{"name": "Alice Johnson", "dept": "Finance",           "grade": "Senior Officer"}'::jsonb,
+         NOW()),
+        (gen_random_uuid(), 'EMP003',
+         '{"name": "Bob Smith",     "dept": "Flight Operations", "grade": "Captain"}'::jsonb,
+         NOW()),
+        (gen_random_uuid(), 'ADMIN001',
+         '{"name": "HR Admin", "dept": "HR", "grade": "HR Administrator", "is_admin": true}'::jsonb,
+         NOW())
+    ON CONFLICT ("identifier") DO NOTHING;
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: hr-chatbot
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+      external_labels:
+        project: "hr-chatbot"
+        env: "production"
+
+    scrape_configs:
+      - job_name: "hr-chatbot"
+        metrics_path: /metrics
+        static_configs:
+          - targets: ["app-metrics:9091"]
+            labels:
+              service: "hr-chatbot"
+
+      - job_name: "prometheus"
+        static_configs:
+          - targets: ["localhost:9090"]
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loki-config
+  namespace: hr-chatbot
+data:
+  local-config.yaml: |
+    auth_enabled: false
+
+    server:
+      http_listen_port: 3100
+      grpc_listen_port: 9096
+
+    common:
+      instance_addr: 127.0.0.1
+      path_prefix: /loki
+      storage:
+        filesystem:
+          chunks_directory: /loki/chunks
+          rules_directory: /loki/rules
+      replication_factor: 1
+      ring:
+        kvstore:
+          store: inmemory
+
+    query_range:
+      results_cache:
+        cache:
+          embedded_cache:
+            enabled: true
+            max_size_mb: 100
+
+    schema_config:
+      configs:
+        - from: 2024-01-01
+          store: tsdb
+          object_store: filesystem
+          schema: v13
+          index:
+            prefix: index_
+            period: 24h
+
+    limits_config:
+      retention_period: 72h
+      allow_structured_metadata: true
+
+    compactor:
+      working_directory: /loki/compactor
+      retention_enabled: true
+      delete_request_store: filesystem
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: promtail-config
+  namespace: hr-chatbot
+data:
+  config.yml: |
+    server:
+      http_listen_port: 9080
+      grpc_listen_port: 0
+
+    positions:
+      filename: /run/promtail/positions.yaml
+
+    clients:
+      - url: http://loki:3100/loki/api/v1/push
+
+    scrape_configs:
+      - job_name: kubernetes-pods
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names:
+                - hr-chatbot
+
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            action: keep
+            regex: .+
+
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            target_label: service
+
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: container
+
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+
+          - source_labels: [__meta_kubernetes_pod_container_name]
+            target_label: stream
+
+          - source_labels:
+              - __meta_kubernetes_pod_uid
+              - __meta_kubernetes_pod_container_name
+            separator: /
+            target_label: __path__
+            replacement: /var/log/pods/*$1/*.log
+
+        pipeline_stages:
+          - docker: {}
+          - json:
+              expressions:
+                level:     level
+                logger:    name
+                message:   msg
+                timestamp: timestamp
+          - labels:
+              level:
+              logger:
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  namespace: hr-chatbot
+data:
+  prometheus.yml: |
+    apiVersion: 1
+
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        uid: prometheus
+        access: proxy
+        url: http://prometheus:9090
+        isDefault: true
+        editable: false
+        jsonData:
+          timeInterval: "15s"
+
+  loki.yml: |
+    apiVersion: 1
+
+    datasources:
+      - name: Loki
+        type: loki
+        uid: loki
+        access: proxy
+        url: http://loki:3100
+        isDefault: false
+        editable: false
+        jsonData:
+          maxLines: 1000
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-provider
+  namespace: hr-chatbot
+data:
+  dashboards.yml: |
+    apiVersion: 1
+
+    providers:
+      - name: "HR Chatbot"
+        orgId: 1
+        folder: "HR Chatbot"
+        type: file
+        disableDeletion: false
+        updateIntervalSeconds: 30
+        allowUiUpdates: true
+        options:
+          path: /etc/grafana/provisioning/dashboards
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-json
+  namespace: hr-chatbot
+data:
+  hr_chatbot_overview.json: |
+    {
+      "__inputs": [],
+      "__requires": [],
+      "annotations": { "list": [] },
+      "description": "Flydubai HR Chatbot — application metrics and performance monitoring",
+      "editable": true,
+      "fiscalYearStartMonth": 0,
+      "graphTooltip": 1,
+      "id": null,
+      "links": [],
+      "panels": [
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+          "id": 1,
+          "title": "Traffic",
+          "type": "row"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": {
+            "defaults": { "color": { "mode": "palette-classic" }, "unit": "reqps" },
+            "overrides": []
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+          "id": 2,
+          "options": { "tooltip": { "mode": "multi" } },
+          "targets": [
+            {
+              "expr": "sum(rate(hr_chat_messages_total[5m])) by (intent)",
+              "legendFormat": "{{intent}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Messages / sec (by intent)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": {
+            "defaults": { "color": { "mode": "palette-classic" }, "unit": "none" },
+            "overrides": []
+          },
+          "gridPos": { "h": 8, "w": 6, "x": 12, "y": 1 },
+          "id": 3,
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "orientation": "auto", "textMode": "auto", "colorMode": "value", "graphMode": "area" },
+          "targets": [
+            { "expr": "hr_chat_active_sessions", "legendFormat": "Active", "refId": "A" }
+          ],
+          "title": "Active Sessions",
+          "type": "stat"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": {
+            "defaults": { "color": { "mode": "palette-classic" }, "unit": "none" },
+            "overrides": []
+          },
+          "gridPos": { "h": 8, "w": 6, "x": 18, "y": 1 },
+          "id": 4,
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "orientation": "auto", "textMode": "auto", "colorMode": "value", "graphMode": "area" },
+          "targets": [
+            { "expr": "increase(hr_chat_knowledge_gaps_total[1h])", "legendFormat": "Gaps (1h)", "refId": "A" }
+          ],
+          "title": "Knowledge Gaps (last 1h)",
+          "type": "stat"
+        },
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 },
+          "id": 5,
+          "title": "Latency",
+          "type": "row"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": {
+            "defaults": { "color": { "mode": "palette-classic" }, "unit": "s" },
+            "overrides": []
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 10 },
+          "id": 6,
+          "options": { "tooltip": { "mode": "multi" } },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.50, sum(rate(hr_chat_response_duration_seconds_bucket[5m])) by (le, intent))",
+              "legendFormat": "p50 {{intent}}",
+              "refId": "A"
+            },
+            {
+              "expr": "histogram_quantile(0.90, sum(rate(hr_chat_response_duration_seconds_bucket[5m])) by (le, intent))",
+              "legendFormat": "p90 {{intent}}",
+              "refId": "B"
+            },
+            {
+              "expr": "histogram_quantile(0.99, sum(rate(hr_chat_response_duration_seconds_bucket[5m])) by (le, intent))",
+              "legendFormat": "p99 {{intent}}",
+              "refId": "C"
+            }
+          ],
+          "title": "Response Latency (p50 / p90 / p99)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": {
+            "defaults": { "color": { "mode": "palette-classic" }, "unit": "none" },
+            "overrides": []
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 10 },
+          "id": 7,
+          "options": { "tooltip": { "mode": "multi" } },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.90, sum(rate(hr_rag_retrieved_chunks_bucket[5m])) by (le))",
+              "legendFormat": "p90 chunks",
+              "refId": "A"
+            }
+          ],
+          "title": "RAG Chunks Retrieved (p90)",
+          "type": "timeseries"
+        },
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 18 },
+          "id": 8,
+          "title": "Errors & External Services",
+          "type": "row"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": {
+            "defaults": { "color": { "mode": "palette-classic" }, "unit": "reqps" },
+            "overrides": []
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 19 },
+          "id": 9,
+          "options": { "tooltip": { "mode": "multi" } },
+          "targets": [
+            {
+              "expr": "sum(rate(hr_chat_errors_total[5m])) by (reason)",
+              "legendFormat": "{{reason}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Error Rate (by reason)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": {
+            "defaults": { "color": { "mode": "palette-classic" }, "unit": "reqps" },
+            "overrides": []
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 19 },
+          "id": 10,
+          "options": { "tooltip": { "mode": "multi" } },
+          "targets": [
+            {
+              "expr": "sum(rate(hr_oracle_requests_total[5m])) by (status)",
+              "legendFormat": "Oracle {{status}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Oracle MCP Requests / sec",
+          "type": "timeseries"
+        },
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 27 },
+          "id": 11,
+          "title": "Logs",
+          "type": "row"
+        },
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "gridPos": { "h": 12, "w": 24, "x": 0, "y": 28 },
+          "id": 12,
+          "options": {
+            "dedupStrategy": "none",
+            "enableLogDetails": true,
+            "prettifyLogMessage": true,
+            "showCommonLabels": false,
+            "showLabels": false,
+            "showTime": true,
+            "sortOrder": "Descending",
+            "wrapLogMessage": true
+          },
+          "targets": [
+            {
+              "datasource": { "type": "loki", "uid": "loki" },
+              "expr": "{namespace=\"hr-chatbot\", service=\"app\"} | json | line_format \"{{.message}}\"",
+              "legendFormat": "",
+              "refId": "A"
+            }
+          ],
+          "title": "App Logs (all levels)",
+          "type": "logs"
+        },
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "gridPos": { "h": 10, "w": 12, "x": 0, "y": 40 },
+          "id": 13,
+          "options": {
+            "dedupStrategy": "none",
+            "enableLogDetails": true,
+            "prettifyLogMessage": true,
+            "showCommonLabels": false,
+            "showLabels": true,
+            "showTime": true,
+            "sortOrder": "Descending",
+            "wrapLogMessage": true
+          },
+          "targets": [
+            {
+              "datasource": { "type": "loki", "uid": "loki" },
+              "expr": "{namespace=\"hr-chatbot\", service=\"app\"} | json | level=~\"error|warning\" | line_format \"{{.message}}\"",
+              "legendFormat": "",
+              "refId": "A"
+            }
+          ],
+          "title": "Warnings & Errors",
+          "type": "logs"
+        },
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "gridPos": { "h": 10, "w": 12, "x": 12, "y": 40 },
+          "id": 14,
+          "options": {
+            "dedupStrategy": "none",
+            "enableLogDetails": true,
+            "prettifyLogMessage": false,
+            "showCommonLabels": false,
+            "showLabels": true,
+            "showTime": true,
+            "sortOrder": "Descending",
+            "wrapLogMessage": false
+          },
+          "targets": [
+            {
+              "datasource": { "type": "loki", "uid": "loki" },
+              "expr": "{namespace=\"hr-chatbot\", service=~\"postgres|oracle\"}",
+              "legendFormat": "",
+              "refId": "A"
+            }
+          ],
+          "title": "Postgres & Oracle Logs",
+          "type": "logs"
+        }
+      ],
+      "refresh": "30s",
+      "schemaVersion": 39,
+      "tags": ["hr-chatbot", "poc"],
+      "templating": { "list": [] },
+      "time": { "from": "now-1h", "to": "now" },
+      "timepicker": {},
+      "timezone": "browser",
+      "title": "HR Chatbot Overview",
+      "uid": "hr-chatbot-overview",
+      "version": 1
+    }
+
+  hr_chatbot_full.json: |
+    {
+      "description": "Flydubai HR Chatbot — full observability: metrics, latency, errors and live logs for every service",
+      "editable": true,
+      "graphTooltip": 1,
+      "id": null,
+      "links": [],
+      "panels": [
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+          "id": 1,
+          "title": "At a Glance",
+          "type": "row"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "thresholds" },
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 5 },
+                { "color": "red", "value": 20 }
+              ]},
+              "unit": "none", "mappings": []
+            }
+          },
+          "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
+          "id": 2,
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "orientation": "auto", "textMode": "auto", "colorMode": "background", "graphMode": "none" },
+          "targets": [{ "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "hr_chat_active_sessions", "legendFormat": "Active Sessions", "refId": "A" }],
+          "title": "Active Sessions",
+          "type": "stat"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "thresholds" },
+              "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }]},
+              "unit": "none"
+            }
+          },
+          "gridPos": { "h": 4, "w": 4, "x": 4, "y": 1 },
+          "id": 3,
+          "options": { "reduceOptions": { "calcs": ["sum"] }, "orientation": "auto", "textMode": "auto", "colorMode": "background", "graphMode": "area" },
+          "targets": [{ "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "increase(hr_chat_messages_total[24h])", "legendFormat": "Messages", "refId": "A" }],
+          "title": "Messages (24 h)",
+          "type": "stat"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "thresholds" },
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 0.01 },
+                { "color": "red", "value": 0.05 }
+              ]},
+              "unit": "percentunit"
+            }
+          },
+          "gridPos": { "h": 4, "w": 4, "x": 8, "y": 1 },
+          "id": 4,
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "orientation": "auto", "textMode": "auto", "colorMode": "background", "graphMode": "area" },
+          "targets": [{ "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "rate(hr_chat_errors_total[5m]) / (rate(hr_chat_messages_total[5m]) + 0.0001)", "legendFormat": "Error Rate", "refId": "A" }],
+          "title": "Error Rate",
+          "type": "stat"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "thresholds" },
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 3 },
+                { "color": "red", "value": 8 }
+              ]},
+              "unit": "s"
+            }
+          },
+          "gridPos": { "h": 4, "w": 4, "x": 12, "y": 1 },
+          "id": 5,
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "orientation": "auto", "textMode": "auto", "colorMode": "background", "graphMode": "area" },
+          "targets": [{ "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "histogram_quantile(0.95, sum(rate(hr_chat_response_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p95 latency", "refId": "A" }],
+          "title": "p95 Response Latency",
+          "type": "stat"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "thresholds" },
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 3 },
+                { "color": "red", "value": 10 }
+              ]},
+              "unit": "none"
+            }
+          },
+          "gridPos": { "h": 4, "w": 4, "x": 16, "y": 1 },
+          "id": 6,
+          "options": { "reduceOptions": { "calcs": ["sum"] }, "orientation": "auto", "textMode": "auto", "colorMode": "background", "graphMode": "area" },
+          "targets": [{ "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "increase(hr_chat_knowledge_gaps_total[24h])", "legendFormat": "Gaps", "refId": "A" }],
+          "title": "Knowledge Gaps (24 h)",
+          "type": "stat"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "thresholds" },
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "red", "value": null },
+                { "color": "yellow", "value": 0.9 },
+                { "color": "green", "value": 0.99 }
+              ]},
+              "unit": "percentunit"
+            }
+          },
+          "gridPos": { "h": 4, "w": 4, "x": 20, "y": 1 },
+          "id": 7,
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "orientation": "auto", "textMode": "auto", "colorMode": "background", "graphMode": "none" },
+          "targets": [{ "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "rate(hr_oracle_requests_total{status=\"success\"}[5m]) / (rate(hr_oracle_requests_total[5m]) + 0.0001)", "legendFormat": "Oracle Success", "refId": "A" }],
+          "title": "Oracle Success Rate",
+          "type": "stat"
+        },
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+          "id": 10,
+          "title": "Traffic",
+          "type": "row"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "reqps" }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 14, "x": 0, "y": 6 },
+          "id": 11,
+          "options": { "tooltip": { "mode": "multi", "sort": "desc" }, "legend": { "displayMode": "table", "placement": "right", "calcs": ["mean", "max"] } },
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum(rate(hr_chat_messages_total[5m])) by (intent)", "legendFormat": "{{intent}}", "refId": "A" }
+          ],
+          "title": "Messages / sec by Intent",
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "short" }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 10, "x": 14, "y": 6 },
+          "id": 12,
+          "options": { "displayLabels": ["name", "percent"], "legend": { "displayMode": "table", "placement": "right", "calcs": ["sum"] }, "pieType": "donut", "tooltip": { "mode": "multi" } },
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum(increase(hr_chat_messages_total[$__range])) by (intent)", "legendFormat": "{{intent}}", "refId": "A" }
+          ],
+          "title": "Intent Distribution",
+          "type": "piechart"
+        },
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 },
+          "id": 20,
+          "title": "Performance",
+          "type": "row"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "s", "custom": { "lineWidth": 2 } }, "overrides": [] },
+          "gridPos": { "h": 9, "w": 14, "x": 0, "y": 15 },
+          "id": 21,
+          "options": { "tooltip": { "mode": "multi", "sort": "desc" }, "legend": { "displayMode": "table", "placement": "right", "calcs": ["mean", "max", "lastNotNull"] } },
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "histogram_quantile(0.50, sum(rate(hr_chat_response_duration_seconds_bucket[5m])) by (le, intent))", "legendFormat": "p50 — {{intent}}", "refId": "A" },
+            { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "histogram_quantile(0.90, sum(rate(hr_chat_response_duration_seconds_bucket[5m])) by (le, intent))", "legendFormat": "p90 — {{intent}}", "refId": "B" },
+            { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "histogram_quantile(0.99, sum(rate(hr_chat_response_duration_seconds_bucket[5m])) by (le, intent))", "legendFormat": "p99 — {{intent}}", "refId": "C" }
+          ],
+          "title": "Response Latency — p50 / p90 / p99 by Intent",
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "short" }, "overrides": [] },
+          "gridPos": { "h": 9, "w": 10, "x": 14, "y": 15 },
+          "id": 22,
+          "options": { "tooltip": { "mode": "multi", "sort": "desc" }, "legend": { "displayMode": "table", "placement": "right", "calcs": ["mean", "max"] } },
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "histogram_quantile(0.50, sum(rate(hr_rag_retrieved_chunks_bucket[5m])) by (le))", "legendFormat": "p50 chunks", "refId": "A" },
+            { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "histogram_quantile(0.90, sum(rate(hr_rag_retrieved_chunks_bucket[5m])) by (le))", "legendFormat": "p90 chunks", "refId": "B" },
+            { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "histogram_quantile(0.99, sum(rate(hr_rag_retrieved_chunks_bucket[5m])) by (le))", "legendFormat": "p99 chunks", "refId": "C" }
+          ],
+          "title": "RAG Chunks Retrieved per Query",
+          "type": "timeseries"
+        },
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 24 },
+          "id": 30,
+          "title": "Errors & Knowledge Gaps",
+          "type": "row"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "reqps", "custom": { "lineWidth": 2 } }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 8, "x": 0, "y": 25 },
+          "id": 31,
+          "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["sum"] } },
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum(rate(hr_chat_errors_total[5m])) by (reason)", "legendFormat": "{{reason}}", "refId": "A" }
+          ],
+          "title": "Workflow Error Rate by Reason",
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "reqps" }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 8, "x": 8, "y": 25 },
+          "id": 32,
+          "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["sum"] } },
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum(rate(hr_oracle_requests_total[5m])) by (status)", "legendFormat": "Oracle — {{status}}", "refId": "A" }
+          ],
+          "title": "Oracle MCP Requests / sec",
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": { "defaults": { "color": { "mode": "fixed", "fixedColor": "orange" }, "unit": "short", "custom": { "lineWidth": 2, "fillOpacity": 10 } }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 8, "x": 16, "y": 25 },
+          "id": 33,
+          "options": { "tooltip": { "mode": "single" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "increase(hr_chat_knowledge_gaps_total[5m])", "legendFormat": "Knowledge Gaps", "refId": "A" }
+          ],
+          "title": "Knowledge Gaps Rate",
+          "type": "timeseries"
+        },
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 33 },
+          "id": 40,
+          "title": "Application Logs",
+          "type": "row"
+        },
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "gridPos": { "h": 12, "w": 24, "x": 0, "y": 34 },
+          "id": 41,
+          "options": {
+            "dedupStrategy": "none",
+            "enableLogDetails": true,
+            "prettifyLogMessage": true,
+            "showCommonLabels": false,
+            "showLabels": false,
+            "showTime": true,
+            "sortOrder": "Descending",
+            "wrapLogMessage": true
+          },
+          "targets": [
+            {
+              "datasource": { "type": "loki", "uid": "loki" },
+              "expr": "{namespace=\"hr-chatbot\", service=\"app\"} | json | drop __error__, __error_details__ | line_format \"[{{.level}}] {{.logger}} — {{.msg}}\"",
+              "refId": "A"
+            }
+          ],
+          "title": "App — All Logs",
+          "type": "logs"
+        },
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "gridPos": { "h": 10, "w": 12, "x": 0, "y": 46 },
+          "id": 42,
+          "options": {
+            "dedupStrategy": "signature",
+            "enableLogDetails": true,
+            "prettifyLogMessage": true,
+            "showCommonLabels": false,
+            "showLabels": true,
+            "showTime": true,
+            "sortOrder": "Descending",
+            "wrapLogMessage": true
+          },
+          "targets": [
+            {
+              "datasource": { "type": "loki", "uid": "loki" },
+              "expr": "{namespace=\"hr-chatbot\", service=\"app\"} | json | drop __error__, __error_details__ | level=~\"error|warning\" | line_format \"[{{.level}}] {{.logger}} — {{.msg}}\"",
+              "refId": "A"
+            }
+          ],
+          "title": "App — Warnings & Errors",
+          "type": "logs"
+        },
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "short" }, "overrides": [] },
+          "gridPos": { "h": 10, "w": 12, "x": 12, "y": 46 },
+          "id": 43,
+          "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["sum"] } },
+          "targets": [
+            {
+              "datasource": { "type": "loki", "uid": "loki" },
+              "expr": "sum(count_over_time({namespace=\"hr-chatbot\", service=\"app\"} | json | drop __error__, __error_details__ | level=\"error\" [5m]))",
+              "legendFormat": "errors",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "loki", "uid": "loki" },
+              "expr": "sum(count_over_time({namespace=\"hr-chatbot\", service=\"app\"} | json | drop __error__, __error_details__ | level=\"warning\" [5m]))",
+              "legendFormat": "warnings",
+              "refId": "B"
+            },
+            {
+              "datasource": { "type": "loki", "uid": "loki" },
+              "expr": "sum(count_over_time({namespace=\"hr-chatbot\", service=\"app\"} | json | drop __error__, __error_details__ | level=\"info\" [5m]))",
+              "legendFormat": "info",
+              "refId": "C"
+            }
+          ],
+          "title": "App — Log Volume by Level",
+          "type": "timeseries"
+        },
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 56 },
+          "id": 50,
+          "title": "Infrastructure Logs",
+          "type": "row"
+        },
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "gridPos": { "h": 10, "w": 12, "x": 0, "y": 57 },
+          "id": 51,
+          "options": {
+            "dedupStrategy": "none",
+            "enableLogDetails": true,
+            "prettifyLogMessage": false,
+            "showCommonLabels": false,
+            "showLabels": false,
+            "showTime": true,
+            "sortOrder": "Descending",
+            "wrapLogMessage": false
+          },
+          "targets": [
+            {
+              "datasource": { "type": "loki", "uid": "loki" },
+              "expr": "{namespace=\"hr-chatbot\", service=\"postgres\"}",
+              "refId": "A"
+            }
+          ],
+          "title": "Postgres Logs",
+          "type": "logs"
+        },
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "gridPos": { "h": 10, "w": 12, "x": 12, "y": 57 },
+          "id": 52,
+          "options": {
+            "dedupStrategy": "none",
+            "enableLogDetails": true,
+            "prettifyLogMessage": false,
+            "showCommonLabels": false,
+            "showLabels": false,
+            "showTime": true,
+            "sortOrder": "Descending",
+            "wrapLogMessage": false
+          },
+          "targets": [
+            {
+              "datasource": { "type": "loki", "uid": "loki" },
+              "expr": "{namespace=\"hr-chatbot\", service=\"oracle\"}",
+              "refId": "A"
+            }
+          ],
+          "title": "Oracle MCP Logs",
+          "type": "logs"
+        },
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 67 },
+          "id": 53,
+          "options": {
+            "dedupStrategy": "none",
+            "enableLogDetails": true,
+            "prettifyLogMessage": false,
+            "showCommonLabels": false,
+            "showLabels": true,
+            "showTime": true,
+            "sortOrder": "Descending",
+            "wrapLogMessage": false
+          },
+          "targets": [
+            {
+              "datasource": { "type": "loki", "uid": "loki" },
+              "expr": "{namespace=\"hr-chatbot\", service=~\"prometheus|loki|promtail|grafana\"}",
+              "refId": "A"
+            }
+          ],
+          "title": "Monitoring Stack Logs (Prometheus / Loki / Promtail / Grafana)",
+          "type": "logs"
+        }
+      ],
+      "refresh": "30s",
+      "schemaVersion": 39,
+      "tags": ["hr-chatbot", "poc", "full"],
+      "templating": { "list": [] },
+      "time": { "from": "now-1h", "to": "now" },
+      "timepicker": {},
+      "timezone": "browser",
+      "title": "HR Chatbot — Full Observability",
+      "uid": "hr-chatbot-full",
+      "version": 1
+    }

@@ -1,0 +1,67 @@
+# Persistent Volume Claims for airline-hr-chatbot on k3s.
+# storageClassName: local-path — k3s default provisioner (single-node HostPath).
+# For multi-node clusters consider longhorn or hcloud-volumes.
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-data
+  namespace: hr-chatbot
+  labels:
+    app: postgres
+    app.kubernetes.io/part-of: airline-hr-chatbot
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: prometheus-data
+  namespace: hr-chatbot
+  labels:
+    app: prometheus
+    app.kubernetes.io/part-of: airline-hr-chatbot
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 20Gi  # 15-day retention at ~1 MB/min ≈ 20-30 GB
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: loki-data
+  namespace: hr-chatbot
+  labels:
+    app: loki
+    app.kubernetes.io/part-of: airline-hr-chatbot
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 10Gi  # 72h log retention
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: grafana-data
+  namespace: hr-chatbot
+  labels:
+    app: grafana
+    app.kubernetes.io/part-of: airline-hr-chatbot
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 5Gi  # Grafana state: plugin cache, SQLite DB, alert state

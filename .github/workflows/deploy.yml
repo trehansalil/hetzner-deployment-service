@@ -1,6 +1,6 @@
 # Deploy workflow — lives in hetzner-deployment-service
 # Triggered by:
-#   1. A repository_dispatch event from neonatal-care-repo after image push
+#   1. A repository_dispatch event from neonatal-care-repo or airline-hr-chatbot after image push
 #   2. Manual workflow_dispatch for any app
 
 name: Deploy to Hetzner
@@ -9,6 +9,7 @@ on:
   repository_dispatch:
     types:
       - neonatal-care-image-updated
+      - airline-hr-chatbot-image-updated
   workflow_dispatch:
     inputs:
       app:
@@ -18,6 +19,7 @@ on:
         type: choice
         options:
           - neonatal-care
+          - airline-hr-chatbot
       image_tag:
         description: 'Image tag (SHA or latest)'
         required: false
@@ -49,16 +51,29 @@ jobs:
           echo "app=$APP" >> $GITHUB_OUTPUT
           echo "image_tag=$TAG" >> $GITHUB_OUTPUT
 
-      - name: Apply k8s manifests
+      - name: Apply k8s manifests — neonatal-care
+        if: steps.vars.outputs.app == 'neonatal-care'
         run: |
-          kubectl apply -f apps/${{ steps.vars.outputs.app }}/namespace.yaml
-          kubectl apply -f apps/${{ steps.vars.outputs.app }}/configmap.yaml -n ${{ steps.vars.outputs.app }}
-          kubectl apply -f apps/${{ steps.vars.outputs.app }}/pvc.yaml -n ${{ steps.vars.outputs.app }}
-          kubectl apply -f apps/${{ steps.vars.outputs.app }}/deployment.yaml -n ${{ steps.vars.outputs.app }}
-          kubectl apply -f apps/${{ steps.vars.outputs.app }}/service.yaml -n ${{ steps.vars.outputs.app }}
-          kubectl apply -f apps/${{ steps.vars.outputs.app }}/ingress.yaml -n ${{ steps.vars.outputs.app }}
+          kubectl apply -f apps/neonatal-care/namespace.yaml
+          kubectl apply -f apps/neonatal-care/configmap.yaml -n neonatal-care
+          kubectl apply -f apps/neonatal-care/pvc.yaml -n neonatal-care
+          kubectl apply -f apps/neonatal-care/deployment.yaml -n neonatal-care
+          kubectl apply -f apps/neonatal-care/service.yaml -n neonatal-care
+          kubectl apply -f apps/neonatal-care/ingress.yaml -n neonatal-care
 
-      - name: Update image tag (rolling deploy)
+      - name: Apply k8s manifests — airline-hr-chatbot
+        if: steps.vars.outputs.app == 'airline-hr-chatbot'
+        run: |
+          kubectl apply -f apps/airline-hr-chatbot/namespace.yaml
+          kubectl apply -f apps/airline-hr-chatbot/rbac.yaml
+          kubectl apply -f apps/airline-hr-chatbot/configmap.yaml -n hr-chatbot
+          kubectl apply -f apps/airline-hr-chatbot/pvc.yaml -n hr-chatbot
+          kubectl apply -f apps/airline-hr-chatbot/deployment.yaml -n hr-chatbot
+          kubectl apply -f apps/airline-hr-chatbot/daemonset.yaml -n hr-chatbot
+          kubectl apply -f apps/airline-hr-chatbot/service.yaml -n hr-chatbot
+          kubectl apply -f apps/airline-hr-chatbot/ingress.yaml -n hr-chatbot
+
+      - name: Update image tag (rolling deploy) — neonatal-care
         if: steps.vars.outputs.app == 'neonatal-care'
         run: |
           kubectl set image deployment/neonatal-care-backend \
@@ -71,6 +86,18 @@ jobs:
           kubectl rollout status deployment/neonatal-care-backend -n neonatal-care --timeout=300s
           kubectl rollout status deployment/neonatal-care-nginx -n neonatal-care --timeout=120s
 
+      - name: Update image tag (rolling deploy) — airline-hr-chatbot
+        if: steps.vars.outputs.app == 'airline-hr-chatbot'
+        run: |
+          kubectl set image deployment/app \
+            app=ghcr.io/trehansalil/airline-hr-chatbot:${{ steps.vars.outputs.image_tag }} \
+            -n hr-chatbot
+          kubectl set image deployment/oracle \
+            oracle=ghcr.io/trehansalil/airline-hr-chatbot:${{ steps.vars.outputs.image_tag }} \
+            -n hr-chatbot
+          kubectl rollout status deployment/app -n hr-chatbot --timeout=300s
+          kubectl rollout status deployment/oracle -n hr-chatbot --timeout=120s
+
       - name: Verify deployment
         run: |
-          kubectl get pods -n ${{ steps.vars.outputs.app }}
+          kubectl get pods -n ${{ steps.vars.outputs.app == 'airline-hr-chatbot' && 'hr-chatbot' || steps.vars.outputs.app }}

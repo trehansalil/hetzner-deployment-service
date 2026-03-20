@@ -66,3 +66,103 @@ init-clickhouse:
 destroy-neonatal:
 	@echo "WARNING: This will delete all neonatal-care resources including persistent volumes!"
 	$(KUBECTL) delete namespace $(NEONATAL_NS)
+
+# ─── Airline HR Chatbot ───────────────────────────────────────────────────────
+
+HR_NS := hr-chatbot
+HR_IMAGE := ghcr.io/trehansalil/airline-hr-chatbot
+HR_IMAGE_TAG ?= latest
+
+.PHONY: deploy-hr
+deploy-hr:
+	$(KUBECTL) apply -f apps/airline-hr-chatbot/namespace.yaml
+	$(KUBECTL) apply -f apps/airline-hr-chatbot/rbac.yaml
+	$(KUBECTL) apply -f apps/airline-hr-chatbot/configmap.yaml -n $(HR_NS)
+	$(KUBECTL) apply -f apps/airline-hr-chatbot/secret.yaml -n $(HR_NS)
+	$(KUBECTL) apply -f apps/airline-hr-chatbot/pvc.yaml -n $(HR_NS)
+	$(KUBECTL) apply -f apps/airline-hr-chatbot/deployment.yaml -n $(HR_NS)
+	$(KUBECTL) apply -f apps/airline-hr-chatbot/daemonset.yaml -n $(HR_NS)
+	$(KUBECTL) apply -f apps/airline-hr-chatbot/service.yaml -n $(HR_NS)
+	$(KUBECTL) apply -f apps/airline-hr-chatbot/ingress.yaml -n $(HR_NS)
+
+.PHONY: rollout-hr
+rollout-hr:
+	$(KUBECTL) set image deployment/app \
+		app=$(HR_IMAGE):$(HR_IMAGE_TAG) \
+		-n $(HR_NS)
+	$(KUBECTL) set image deployment/oracle \
+		oracle=$(HR_IMAGE):$(HR_IMAGE_TAG) \
+		-n $(HR_NS)
+	$(KUBECTL) rollout status deployment/app -n $(HR_NS) --timeout=300s
+	$(KUBECTL) rollout status deployment/oracle -n $(HR_NS) --timeout=120s
+
+.PHONY: status-hr
+status-hr:
+	$(KUBECTL) get pods,svc,ingress,pvc -n $(HR_NS)
+
+.PHONY: logs-hr
+logs-hr:
+	$(KUBECTL) logs -l app=app -n $(HR_NS) --tail=100 -f
+
+.PHONY: rollback-hr
+rollback-hr:
+	$(KUBECTL) rollout undo deployment/app -n $(HR_NS)
+
+.PHONY: ghcr-secret-hr
+ghcr-secret-hr:
+	@if [ -z "$(GITHUB_PAT)" ]; then \
+		echo "ERROR: GITHUB_PAT is required. Run: make ghcr-secret-hr GITHUB_PAT=<your-pat>"; \
+		exit 1; \
+	fi
+	$(KUBECTL) apply -f apps/airline-hr-chatbot/namespace.yaml
+	$(KUBECTL) create secret docker-registry ghcr-credentials \
+		--docker-server=ghcr.io \
+		--docker-username=trehansalil \
+		--docker-password=$(GITHUB_PAT) \
+		-n $(HR_NS) \
+		--dry-run=client -o yaml | $(KUBECTL) apply -f -
+
+.PHONY: k8s-secrets-hr
+k8s-secrets-hr:
+	@if [ ! -f apps/airline-hr-chatbot/secret.yaml ]; then \
+		echo "ERROR: apps/airline-hr-chatbot/secret.yaml not found."; \
+		echo "Copy secret.yaml.example, fill in base64 values, then re-run."; \
+		exit 1; \
+	fi
+	$(KUBECTL) apply -f apps/airline-hr-chatbot/namespace.yaml
+	$(KUBECTL) apply -f apps/airline-hr-chatbot/secret.yaml -n $(HR_NS)
+
+.PHONY: ingest-hr
+ingest-hr:
+	$(KUBECTL) exec -n $(HR_NS) deploy/app -- python ingest.py --docs-dir /app/docs
+
+.PHONY: ingest-recreate-hr
+ingest-recreate-hr:
+	$(KUBECTL) exec -n $(HR_NS) deploy/app -- python ingest.py --recreate --docs-dir /app/docs
+
+.PHONY: shell-hr
+shell-hr:
+	$(KUBECTL) exec -it -n $(HR_NS) deploy/app -- bash
+
+.PHONY: port-app-hr
+port-app-hr:
+	$(KUBECTL) port-forward -n $(HR_NS) svc/app 9040:9040
+
+.PHONY: port-grafana-hr
+port-grafana-hr:
+	$(KUBECTL) port-forward -n $(HR_NS) svc/grafana 3000:3000
+
+.PHONY: port-prometheus-hr
+port-prometheus-hr:
+	$(KUBECTL) port-forward -n $(HR_NS) svc/prometheus 9090:9090
+
+.PHONY: port-adminer-hr
+port-adminer-hr:
+	$(KUBECTL) port-forward -n $(HR_NS) svc/adminer 8080:8080
+
+.PHONY: destroy-hr
+destroy-hr:
+	@echo "WARNING: This will delete all hr-chatbot resources including persistent volumes!"
+	$(KUBECTL) delete namespace $(HR_NS)
+	$(KUBECTL) delete clusterrole promtail-hr-chatbot --ignore-not-found
+	$(KUBECTL) delete clusterrolebinding promtail-hr-chatbot --ignore-not-found

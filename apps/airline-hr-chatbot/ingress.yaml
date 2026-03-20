@@ -1,0 +1,57 @@
+# Prerequisites:
+#   1. cert-manager installed and letsencrypt-prod ClusterIssuer configured (make cluster-init)
+#   2. DNS A records pointing to the Hetzner server IP:
+#      - airline-hr.saliltrehan.com
+#      - grafana-hr.saliltrehan.com
+---
+# ─── App Ingress ─────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hr-chatbot-app
+  namespace: hr-chatbot
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - airline-hr.saliltrehan.com
+      secretName: hr-chatbot-tls
+  rules:
+    - host: airline-hr.saliltrehan.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: app
+                port:
+                  number: 9040
+---
+# ─── Grafana Ingress ──────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hr-chatbot-grafana
+  namespace: hr-chatbot
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - grafana-hr.saliltrehan.com
+      secretName: hr-chatbot-grafana-tls
+  rules:
+    - host: grafana-hr.saliltrehan.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: grafana
+                port:
+                  number: 3000

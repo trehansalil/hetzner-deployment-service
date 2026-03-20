@@ -1,0 +1,36 @@
+# Promtail needs to list/watch Kubernetes pods and nodes to discover log targets.
+# Grants minimum permissions for kubernetes_sd_configs role: pod.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: promtail
+  namespace: hr-chatbot
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: promtail-hr-chatbot
+rules:
+  - apiGroups: [""]
+    resources:
+      - nodes
+      - pods
+      - namespaces
+    verbs:
+      - get
+      - list
+      - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: promtail-hr-chatbot
+subjects:
+  - kind: ServiceAccount
+    name: promtail
+    namespace: hr-chatbot
+roleRef:
+  kind: ClusterRole
+  name: promtail-hr-chatbot
+  apiGroup: rbac.authorization.k8s.io

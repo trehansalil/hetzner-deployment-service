@@ -1,0 +1,116 @@
+# All services are ClusterIP — Traefik Ingress handles external access.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: hr-chatbot
+spec:
+  type: ClusterIP
+  selector:
+    app: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: oracle
+  namespace: hr-chatbot
+spec:
+  type: ClusterIP
+  selector:
+    app: oracle
+  ports:
+    - name: http
+      port: 8001
+      targetPort: 8001
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: adminer
+  namespace: hr-chatbot
+spec:
+  type: ClusterIP
+  selector:
+    app: adminer
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+# app: Chainlit UI (exposed via Ingress)
+apiVersion: v1
+kind: Service
+metadata:
+  name: app
+  namespace: hr-chatbot
+spec:
+  type: ClusterIP
+  selector:
+    app: app
+  ports:
+    - name: chainlit
+      port: 9040
+      targetPort: 9040
+---
+# app-metrics: Prometheus scrape endpoint (internal)
+apiVersion: v1
+kind: Service
+metadata:
+  name: app-metrics
+  namespace: hr-chatbot
+spec:
+  type: ClusterIP
+  selector:
+    app: app
+  ports:
+    - name: metrics
+      port: 9091
+      targetPort: 9091
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: hr-chatbot
+spec:
+  type: ClusterIP
+  selector:
+    app: prometheus
+  ports:
+    - name: http
+      port: 9090
+      targetPort: 9090
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: loki
+  namespace: hr-chatbot
+spec:
+  type: ClusterIP
+  selector:
+    app: loki
+  ports:
+    - name: http
+      port: 3100
+      targetPort: 3100
+---
+# grafana: exposed via Ingress at grafana-hr.saliltrehan.com
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: hr-chatbot
+spec:
+  type: ClusterIP
+  selector:
+    app: grafana
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
