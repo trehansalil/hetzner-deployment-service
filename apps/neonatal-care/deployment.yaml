@@ -232,6 +232,11 @@ metadata:
     app: neonatal-care-backend
 spec:
   replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0        # terminate old pod BEFORE starting new one — prevents double-memory pressure
+      maxUnavailable: 1
   selector:
     matchLabels:
       app: neonatal-care-backend
@@ -240,6 +245,7 @@ spec:
       labels:
         app: neonatal-care-backend
     spec:
+      terminationGracePeriodSeconds: 60  # allow gunicorn to drain in-flight requests
       containers:
       - name: neonatal-care-backend
         # Updated by CI/CD: ghcr.io/trehansalil/neonatal-care:<sha>
@@ -275,10 +281,10 @@ spec:
           periodSeconds: 5
         resources:
           requests:
-            memory: "256Mi"
+            memory: "512Mi"   # raised from 256Mi — matches steady-state usage (actual: ~520Mi)
             cpu: "200m"
           limits:
-            memory: "1Gi"
+            memory: "1536Mi"  # raised from 1Gi — headroom for gunicorn worker startup spike
             cpu: "1000m"
 ---
 # ─── Nginx (static files + reverse proxy) ─────────────────────────────────────
@@ -291,6 +297,11 @@ metadata:
     app: neonatal-care-nginx
 spec:
   replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0        # initContainer pulls full backend image — avoid concurrent image pulls under pressure
+      maxUnavailable: 1
   selector:
     matchLabels:
       app: neonatal-care-nginx

@@ -26,12 +26,15 @@ cluster-init:
 .PHONY: deploy-neonatal
 deploy-neonatal:
 	$(KUBECTL) apply -f apps/neonatal-care/namespace.yaml
+	$(KUBECTL) apply -f apps/neonatal-care/limitrange.yaml -n $(NEONATAL_NS)
+	$(KUBECTL) apply -f apps/neonatal-care/resourcequota.yaml -n $(NEONATAL_NS)
 	$(KUBECTL) apply -f apps/neonatal-care/configmap.yaml -n $(NEONATAL_NS)
 	$(KUBECTL) apply -f apps/neonatal-care/secret.yaml -n $(NEONATAL_NS)
 	$(KUBECTL) apply -f apps/neonatal-care/pvc.yaml -n $(NEONATAL_NS)
 	$(KUBECTL) apply -f apps/neonatal-care/deployment.yaml -n $(NEONATAL_NS)
 	$(KUBECTL) apply -f apps/neonatal-care/service.yaml -n $(NEONATAL_NS)
 	$(KUBECTL) apply -f apps/neonatal-care/ingress.yaml -n $(NEONATAL_NS)
+	$(KUBECTL) apply -f apps/neonatal-care/cronjob-pod-cleanup.yaml -n $(NEONATAL_NS)
 
 .PHONY: rollout-neonatal
 rollout-neonatal:
@@ -56,6 +59,24 @@ logs-neonatal:
 .PHONY: rollback-neonatal
 rollback-neonatal:
 	$(KUBECTL) rollout undo deployment/neonatal-care-backend -n $(NEONATAL_NS)
+
+.PHONY: clean-pods-neonatal
+clean-pods-neonatal:
+	@echo "Deleting Failed/Evicted pods in $(NEONATAL_NS)..."
+	$(KUBECTL) delete pods -n $(NEONATAL_NS) --field-selector=status.phase==Failed --ignore-not-found
+	@echo "Deleting Succeeded pods in $(NEONATAL_NS)..."
+	$(KUBECTL) delete pods -n $(NEONATAL_NS) --field-selector=status.phase==Succeeded --ignore-not-found
+	@echo "Current pods:"
+	$(KUBECTL) get pods -n $(NEONATAL_NS)
+
+.PHONY: status-neonatal-resources
+status-neonatal-resources:
+	@echo "=== ResourceQuota ==="
+	$(KUBECTL) describe resourcequota neonatal-care-quota -n $(NEONATAL_NS)
+	@echo "=== LimitRange ==="
+	$(KUBECTL) describe limitrange neonatal-care-defaults -n $(NEONATAL_NS)
+	@echo "=== Pods ==="
+	$(KUBECTL) get pods -n $(NEONATAL_NS) -o wide
 
 .PHONY: init-clickhouse
 init-clickhouse:

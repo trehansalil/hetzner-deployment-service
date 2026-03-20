@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: neonatal-care-quota
+  namespace: neonatal-care
+spec:
+  hard:
+    # Memory: sum of all limits (~5.5Gi) + ~1.5Gi rollout headroom
+    requests.memory: "3Gi"
+    limits.memory: "7Gi"
+    # CPU: prevents runaway processes from starving the node
+    requests.cpu: "1500m"
+    limits.cpu: "5000m"
+    # Pod count: hard stop against accumulation of evicted pod objects
+    pods: "20"
+    persistentvolumeclaims: "10"
+    services: "10"
+    count/jobs.batch: "5"
+    count/cronjobs.batch: "5"

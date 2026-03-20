@@ -55,11 +55,14 @@ jobs:
         if: steps.vars.outputs.app == 'neonatal-care'
         run: |
           kubectl apply -f apps/neonatal-care/namespace.yaml
+          kubectl apply -f apps/neonatal-care/limitrange.yaml -n neonatal-care
+          kubectl apply -f apps/neonatal-care/resourcequota.yaml -n neonatal-care
           kubectl apply -f apps/neonatal-care/configmap.yaml -n neonatal-care
           kubectl apply -f apps/neonatal-care/pvc.yaml -n neonatal-care
           kubectl apply -f apps/neonatal-care/deployment.yaml -n neonatal-care
           kubectl apply -f apps/neonatal-care/service.yaml -n neonatal-care
           kubectl apply -f apps/neonatal-care/ingress.yaml -n neonatal-care
+          kubectl apply -f apps/neonatal-care/cronjob-pod-cleanup.yaml -n neonatal-care
 
       - name: Apply k8s manifests — airline-hr-chatbot
         if: steps.vars.outputs.app == 'airline-hr-chatbot'
@@ -97,6 +100,13 @@ jobs:
             -n hr-chatbot
           kubectl rollout status deployment/app -n hr-chatbot --timeout=300s
           kubectl rollout status deployment/oracle -n hr-chatbot --timeout=120s
+
+      - name: Post-deploy pod cleanup — neonatal-care
+        if: steps.vars.outputs.app == 'neonatal-care'
+        run: |
+          echo "Cleaning up evicted/failed/succeeded pods post-deploy..."
+          kubectl delete pods -n neonatal-care --field-selector=status.phase==Failed --ignore-not-found || true
+          kubectl delete pods -n neonatal-care --field-selector=status.phase==Succeeded --ignore-not-found || true
 
       - name: Verify deployment
         run: |
