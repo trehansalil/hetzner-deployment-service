@@ -47,13 +47,13 @@ spec:
               subPath: init.sql
           readinessProbe:
             exec:
-              command: ["pg_isready", "-U", "$(POSTGRES_USER)", "-d", "$(POSTGRES_DB)"]
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
             initialDelaySeconds: 10
             periodSeconds: 5
             failureThreshold: 6
           livenessProbe:
             exec:
-              command: ["pg_isready", "-U", "$(POSTGRES_USER)", "-d", "$(POSTGRES_DB)"]
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
             initialDelaySeconds: 30
             periodSeconds: 10
             failureThreshold: 3
@@ -80,6 +80,11 @@ metadata:
   namespace: hr-chatbot
 spec:
   replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
   selector:
     matchLabels:
       app: oracle
@@ -134,6 +139,11 @@ metadata:
   namespace: hr-chatbot
 spec:
   replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
   selector:
     matchLabels:
       app: adminer
@@ -173,6 +183,11 @@ spec:
   # Chainlit uses in-process session state; keep at 1 until sticky sessions
   # or session externalization is implemented.
   replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
   selector:
     matchLabels:
       app: app
@@ -268,6 +283,8 @@ metadata:
   namespace: hr-chatbot
 spec:
   replicas: 1
+  strategy:
+    type: Recreate    # TSDB uses file lock on /prometheus — cannot run two pods simultaneously
   selector:
     matchLabels:
       app: prometheus
@@ -331,6 +348,8 @@ metadata:
   namespace: hr-chatbot
 spec:
   replicas: 1
+  strategy:
+    type: Recreate    # Compactor uses file lock on /loki — cannot run two pods simultaneously
   selector:
     matchLabels:
       app: loki
@@ -387,6 +406,8 @@ metadata:
   namespace: hr-chatbot
 spec:
   replicas: 1
+  strategy:
+    type: Recreate    # SQLite DB on PVC uses file lock — cannot run two pods simultaneously
   selector:
     matchLabels:
       app: grafana
