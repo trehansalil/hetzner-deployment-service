@@ -3,6 +3,7 @@
 #   2. DNS A records pointing to the Hetzner server IP:
 #      - airline-hr.saliltrehan.com
 #      - grafana-hr.saliltrehan.com
+#      - adminer-hr.saliltrehan.com
 ---
 # ─── App Ingress ─────────────────────────────────────────────────────────────
 apiVersion: networking.k8s.io/v1
@@ -55,3 +56,29 @@ spec:
                 name: grafana
                 port:
                   number: 3000
+---
+# ─── Adminer Ingress ──────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hr-chatbot-adminer
+  namespace: hr-chatbot
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - adminer-hr.saliltrehan.com
+      secretName: hr-chatbot-adminer-tls
+  rules:
+    - host: adminer-hr.saliltrehan.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: adminer
+                port:
+                  number: 8080
