@@ -10,6 +10,7 @@ on:
     types:
       - neonatal-care-image-updated
       - airline-hr-chatbot-image-updated
+      - pageindex-mcp-image-updated
   workflow_dispatch:
     inputs:
       app:
@@ -20,6 +21,7 @@ on:
         options:
           - neonatal-care
           - airline-hr-chatbot
+          - pageindex-mcp
       image_tag:
         description: 'Image tag (SHA or latest)'
         required: false
@@ -83,6 +85,16 @@ jobs:
           kubectl delete pods -n hr-chatbot --field-selector=status.phase==Failed --ignore-not-found || true
           kubectl delete pods -n hr-chatbot --field-selector=status.phase==Succeeded --ignore-not-found || true
 
+      - name: Apply k8s manifests — pageindex-mcp
+        if: steps.vars.outputs.app == 'pageindex-mcp'
+        run: |
+          kubectl apply -f apps/pageindex-mcp/namespace.yaml
+          kubectl apply -f apps/pageindex-mcp/configmap.yaml -n pageindex-mcp
+          kubectl apply -f apps/pageindex-mcp/deployment.yaml -n pageindex-mcp
+          kubectl apply -f apps/pageindex-mcp/service.yaml -n pageindex-mcp
+          kubectl apply -f apps/pageindex-mcp/ingress.yaml -n pageindex-mcp
+          kubectl apply -f apps/pageindex-mcp/cronjob-pod-cleanup.yaml -n pageindex-mcp
+
       - name: Update image tag (rolling deploy) — neonatal-care
         if: steps.vars.outputs.app == 'neonatal-care'
         run: |
@@ -108,6 +120,14 @@ jobs:
           kubectl rollout status deployment/app -n hr-chatbot --timeout=300s
           kubectl rollout status deployment/oracle -n hr-chatbot --timeout=120s
 
+      - name: Update image tag (rolling deploy) — pageindex-mcp
+        if: steps.vars.outputs.app == 'pageindex-mcp'
+        run: |
+          kubectl set image deployment/pageindex-mcp \
+            pageindex-mcp=ghcr.io/trehansalil/pageindex-mcp:${{ steps.vars.outputs.image_tag }} \
+            -n pageindex-mcp
+          kubectl rollout status deployment/pageindex-mcp -n pageindex-mcp --timeout=300s
+
       - name: Post-deploy pod cleanup — neonatal-care
         if: steps.vars.outputs.app == 'neonatal-care'
         run: |
@@ -115,6 +135,19 @@ jobs:
           kubectl delete pods -n neonatal-care --field-selector=status.phase==Failed --ignore-not-found || true
           kubectl delete pods -n neonatal-care --field-selector=status.phase==Succeeded --ignore-not-found || true
 
+      - name: Post-deploy pod cleanup — pageindex-mcp
+        if: steps.vars.outputs.app == 'pageindex-mcp'
+        run: |
+          echo "Cleaning up evicted/failed/succeeded pods post-deploy..."
+          kubectl delete pods -n pageindex-mcp --field-selector=status.phase==Failed --ignore-not-found || true
+          kubectl delete pods -n pageindex-mcp --field-selector=status.phase==Succeeded --ignore-not-found || true
+
       - name: Verify deployment
         run: |
-          kubectl get pods -n ${{ steps.vars.outputs.app == 'airline-hr-chatbot' && 'hr-chatbot' || steps.vars.outputs.app }}
+          APP="${{ steps.vars.outputs.app }}"
+          if [ "$APP" = "airline-hr-chatbot" ]; then
+            NS="hr-chatbot"
+          else
+            NS="$APP"
+          fi
+          kubectl get pods -n "$NS"
