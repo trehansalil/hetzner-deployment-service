@@ -267,6 +267,13 @@ data:
       - job_name: "prometheus"
         static_configs:
           - targets: ["localhost:9090"]
+
+      - job_name: "pageindex-mcp"
+        metrics_path: /metrics
+        static_configs:
+          - targets: ["pageindex-mcp.pageindex-mcp.svc:8201"]
+            labels:
+              service: "pageindex-mcp"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -1241,5 +1248,231 @@ data:
       "timezone": "browser",
       "title": "PageIndex MCP Overview",
       "uid": "pageindex-mcp-overview",
+      "version": 1
+    }
+  pageindex_mcp_metrics.json: |
+    {
+      "description": "PageIndex MCP — document processing, search, and storage metrics",
+      "editable": true,
+      "graphTooltip": 1,
+      "id": null,
+      "links": [],
+      "panels": [
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+          "id": 1,
+          "title": "Overview",
+          "type": "row"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "green", "value": null }] }, "unit": "none" }, "overrides": [] },
+          "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
+          "id": 2,
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "orientation": "auto", "textMode": "auto", "colorMode": "value", "graphMode": "none" },
+          "targets": [{ "expr": "pageindex_documents_total", "legendFormat": "Documents", "refId": "A" }],
+          "title": "Total Documents",
+          "type": "stat"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 3 }, { "color": "red", "value": 5 }] }, "unit": "none" }, "overrides": [] },
+          "gridPos": { "h": 4, "w": 6, "x": 6, "y": 1 },
+          "id": 3,
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "orientation": "auto", "textMode": "auto", "colorMode": "value", "graphMode": "area" },
+          "targets": [{ "expr": "pageindex_active_uploads", "legendFormat": "Active", "refId": "A" }],
+          "title": "Active Uploads",
+          "type": "stat"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "green", "value": null }] }, "unit": "reqps" }, "overrides": [] },
+          "gridPos": { "h": 4, "w": 6, "x": 12, "y": 1 },
+          "id": 4,
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "orientation": "auto", "textMode": "auto", "colorMode": "value", "graphMode": "area" },
+          "targets": [{ "expr": "sum(rate(pageindex_tool_calls_total[5m]))", "legendFormat": "req/s", "refId": "A" }],
+          "title": "Tool Request Rate",
+          "type": "stat"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 0.01 }] }, "unit": "percentunit" }, "overrides": [] },
+          "gridPos": { "h": 4, "w": 6, "x": 18, "y": 1 },
+          "id": 5,
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "orientation": "auto", "textMode": "auto", "colorMode": "value", "graphMode": "area" },
+          "targets": [{ "expr": "sum(rate(pageindex_tool_errors_total[5m])) / (sum(rate(pageindex_tool_calls_total[5m])) + 1e-10)", "legendFormat": "Error %", "refId": "A" }],
+          "title": "Tool Error Rate",
+          "type": "stat"
+        },
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+          "id": 6,
+          "title": "Tool Performance",
+          "type": "row"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "reqps" }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+          "id": 7,
+          "options": { "tooltip": { "mode": "multi" } },
+          "targets": [{ "expr": "sum(rate(pageindex_tool_calls_total[5m])) by (tool)", "legendFormat": "{{tool}}", "refId": "A" }],
+          "title": "Tool Call Rate",
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "s" }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+          "id": 8,
+          "options": { "tooltip": { "mode": "multi" } },
+          "targets": [
+            { "expr": "histogram_quantile(0.50, sum(rate(pageindex_tool_duration_seconds_bucket[5m])) by (le, tool))", "legendFormat": "p50 {{tool}}", "refId": "A" },
+            { "expr": "histogram_quantile(0.95, sum(rate(pageindex_tool_duration_seconds_bucket[5m])) by (le, tool))", "legendFormat": "p95 {{tool}}", "refId": "B" },
+            { "expr": "histogram_quantile(0.99, sum(rate(pageindex_tool_duration_seconds_bucket[5m])) by (le, tool))", "legendFormat": "p99 {{tool}}", "refId": "C" }
+          ],
+          "title": "Tool Latency (p50 / p95 / p99)",
+          "type": "timeseries"
+        },
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 },
+          "id": 9,
+          "title": "Uploads",
+          "type": "row"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "ops" }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 },
+          "id": 10,
+          "options": { "tooltip": { "mode": "multi" } },
+          "targets": [{ "expr": "sum(rate(pageindex_uploads_total[5m])) by (status)", "legendFormat": "{{status}}", "refId": "A" }],
+          "title": "Upload Rate (by status)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "s" }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 15 },
+          "id": 11,
+          "options": { "tooltip": { "mode": "multi" } },
+          "targets": [
+            { "expr": "histogram_quantile(0.50, sum(rate(pageindex_upload_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p50", "refId": "A" },
+            { "expr": "histogram_quantile(0.95, sum(rate(pageindex_upload_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p95", "refId": "B" }
+          ],
+          "title": "Upload Processing Duration (p50 / p95)",
+          "type": "timeseries"
+        },
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 23 },
+          "id": 12,
+          "title": "RAG & LLM",
+          "type": "row"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "ops" }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 8, "x": 0, "y": 24 },
+          "id": 13,
+          "options": { "tooltip": { "mode": "multi" } },
+          "targets": [{ "expr": "rate(pageindex_rag_searches_total[5m])", "legendFormat": "searches/s", "refId": "A" }],
+          "title": "RAG Search Rate",
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "s" }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 8, "x": 8, "y": 24 },
+          "id": 14,
+          "options": { "tooltip": { "mode": "multi" } },
+          "targets": [
+            { "expr": "histogram_quantile(0.50, sum(rate(pageindex_rag_duration_seconds_bucket[5m])) by (le))", "legendFormat": "RAG p50", "refId": "A" },
+            { "expr": "histogram_quantile(0.95, sum(rate(pageindex_rag_duration_seconds_bucket[5m])) by (le))", "legendFormat": "RAG p95", "refId": "B" },
+            { "expr": "histogram_quantile(0.50, sum(rate(pageindex_llm_duration_seconds_bucket[5m])) by (le))", "legendFormat": "LLM p50", "refId": "C" },
+            { "expr": "histogram_quantile(0.95, sum(rate(pageindex_llm_duration_seconds_bucket[5m])) by (le))", "legendFormat": "LLM p95", "refId": "D" }
+          ],
+          "title": "RAG & LLM Latency (p50 / p95)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "green", "value": null }] }, "unit": "none" }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 8, "x": 16, "y": 24 },
+          "id": 15,
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "orientation": "auto", "textMode": "auto", "colorMode": "value", "graphMode": "area" },
+          "targets": [{ "expr": "increase(pageindex_llm_calls_total[1h])", "legendFormat": "LLM calls (1h)", "refId": "A" }],
+          "title": "LLM Calls (last 1h)",
+          "type": "stat"
+        },
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 32 },
+          "id": 16,
+          "title": "Storage",
+          "type": "row"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "ops" }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 33 },
+          "id": 17,
+          "options": { "tooltip": { "mode": "multi" } },
+          "targets": [{ "expr": "sum(rate(pageindex_minio_operations_total[5m])) by (operation)", "legendFormat": "{{operation}}", "refId": "A" }],
+          "title": "MinIO Operation Rate",
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "s" }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 33 },
+          "id": 18,
+          "options": { "tooltip": { "mode": "multi" } },
+          "targets": [
+            { "expr": "histogram_quantile(0.50, sum(rate(pageindex_minio_duration_seconds_bucket[5m])) by (le, operation))", "legendFormat": "p50 {{operation}}", "refId": "A" },
+            { "expr": "histogram_quantile(0.95, sum(rate(pageindex_minio_duration_seconds_bucket[5m])) by (le, operation))", "legendFormat": "p95 {{operation}}", "refId": "B" }
+          ],
+          "title": "MinIO Latency (p50 / p95)",
+          "type": "timeseries"
+        },
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 41 },
+          "id": 19,
+          "title": "System",
+          "type": "row"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "bytes" }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 42 },
+          "id": 20,
+          "options": { "tooltip": { "mode": "multi" } },
+          "targets": [{ "expr": "process_resident_memory_bytes{job=\"pageindex-mcp\"}", "legendFormat": "RSS", "refId": "A" }],
+          "title": "Process Resident Memory",
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "short" }, "overrides": [] },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 42 },
+          "id": 21,
+          "options": { "tooltip": { "mode": "multi" } },
+          "targets": [{ "expr": "rate(process_cpu_seconds_total{job=\"pageindex-mcp\"}[5m])", "legendFormat": "CPU cores", "refId": "A" }],
+          "title": "Process CPU Usage",
+          "type": "timeseries"
+        }
+      ],
+      "schemaVersion": 39,
+      "tags": ["pageindex", "mcp", "metrics"],
+      "templating": { "list": [] },
+      "time": { "from": "now-1h", "to": "now" },
+      "timepicker": {},
+      "timezone": "browser",
+      "title": "PageIndex MCP Metrics",
+      "uid": "pageindex-mcp-metrics",
       "version": 1
     }
