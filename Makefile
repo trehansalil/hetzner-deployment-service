@@ -197,3 +197,66 @@ destroy-hr:
 	$(KUBECTL) delete namespace $(HR_NS)
 	$(KUBECTL) delete clusterrole promtail-hr-chatbot --ignore-not-found
 	$(KUBECTL) delete clusterrolebinding promtail-hr-chatbot --ignore-not-found
+
+# ─── PageIndex MCP Server ────────────────────────────────────────────────────
+
+PAGEINDEX_NS := pageindex-mcp
+PAGEINDEX_IMAGE := ghcr.io/trehansalil/pageindex-mcp
+PAGEINDEX_IMAGE_TAG ?= latest
+
+.PHONY: deploy-pageindex
+deploy-pageindex:
+	$(KUBECTL) apply -f apps/pageindex-mcp/namespace.yaml
+	$(KUBECTL) apply -f apps/pageindex-mcp/configmap.yaml -n $(PAGEINDEX_NS)
+	$(KUBECTL) apply -f apps/pageindex-mcp/deployment.yaml -n $(PAGEINDEX_NS)
+	$(KUBECTL) apply -f apps/pageindex-mcp/service.yaml -n $(PAGEINDEX_NS)
+	$(KUBECTL) apply -f apps/pageindex-mcp/ingress.yaml -n $(PAGEINDEX_NS)
+	$(KUBECTL) apply -f apps/pageindex-mcp/cronjob-pod-cleanup.yaml -n $(PAGEINDEX_NS)
+
+.PHONY: rollout-pageindex
+rollout-pageindex:
+	$(KUBECTL) set image deployment/pageindex-mcp \
+		pageindex-mcp=$(PAGEINDEX_IMAGE):$(PAGEINDEX_IMAGE_TAG) \
+		-n $(PAGEINDEX_NS)
+	$(KUBECTL) rollout status deployment/pageindex-mcp -n $(PAGEINDEX_NS) --timeout=300s
+
+.PHONY: status-pageindex
+status-pageindex:
+	$(KUBECTL) get pods,svc,ingress -n $(PAGEINDEX_NS)
+
+.PHONY: logs-pageindex
+logs-pageindex:
+	$(KUBECTL) logs -l app=pageindex-mcp -n $(PAGEINDEX_NS) --tail=100 -f
+
+.PHONY: rollback-pageindex
+rollback-pageindex:
+	$(KUBECTL) rollout undo deployment/pageindex-mcp -n $(PAGEINDEX_NS)
+
+.PHONY: ghcr-secret-pageindex
+ghcr-secret-pageindex:
+	@if [ -z "$(GITHUB_PAT)" ]; then \
+		echo "ERROR: GITHUB_PAT is required. Run: make ghcr-secret-pageindex GITHUB_PAT=<your-pat>"; \
+		exit 1; \
+	fi
+	$(KUBECTL) apply -f apps/pageindex-mcp/namespace.yaml
+	$(KUBECTL) create secret docker-registry ghcr-credentials \
+		--docker-server=ghcr.io \
+		--docker-username=trehansalil \
+		--docker-password=$(GITHUB_PAT) \
+		-n $(PAGEINDEX_NS) \
+		--dry-run=client -o yaml | $(KUBECTL) apply -f -
+
+.PHONY: k8s-secrets-pageindex
+k8s-secrets-pageindex:
+	@if [ ! -f apps/pageindex-mcp/secret.yaml ]; then \
+		echo "ERROR: apps/pageindex-mcp/secret.yaml not found."; \
+		echo "Copy secret.yaml.example, fill in base64 values, then re-run."; \
+		exit 1; \
+	fi
+	$(KUBECTL) apply -f apps/pageindex-mcp/namespace.yaml
+	$(KUBECTL) apply -f apps/pageindex-mcp/secret.yaml -n $(PAGEINDEX_NS)
+
+.PHONY: destroy-pageindex
+destroy-pageindex:
+	@echo "WARNING: This will delete all pageindex-mcp resources including persistent volumes!"
+	$(KUBECTL) delete namespace $(PAGEINDEX_NS)
