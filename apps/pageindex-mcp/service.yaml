@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: pageindex-mcp
+  namespace: pageindex-mcp
+spec:
+  type: ClusterIP
+  selector:
+    app: pageindex-mcp
+  ports:
+    - name: http
+      port: 8201
+      targetPort: 8201

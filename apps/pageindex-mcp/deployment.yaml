@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pageindex-mcp
+  namespace: pageindex-mcp
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: pageindex-mcp
+  template:
+    metadata:
+      labels:
+        app: pageindex-mcp
+    spec:
+      imagePullSecrets:
+        - name: ghcr-credentials
+      containers:
+        - name: pageindex-mcp
+          image: ghcr.io/trehansalil/pageindex-mcp:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8201
+          envFrom:
+            - configMapRef:
+                name: pageindex-mcp-config
+            - secretRef:
+                name: pageindex-mcp-secrets
+          readinessProbe:
+            tcpSocket:
+              port: 8201
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 5
+          livenessProbe:
+            tcpSocket:
+              port: 8201
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "2Gi"

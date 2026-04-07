@@ -1,0 +1,27 @@
+# Prerequisites:
+#   1. cert-manager installed and letsencrypt-prod ClusterIssuer configured (make cluster-init)
+#   2. DNS A record: pageindex.aiwithsalil.work -> Hetzner server IP
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: pageindex-mcp
+  namespace: pageindex-mcp
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - pageindex.aiwithsalil.work
+      secretName: pageindex-mcp-tls
+  rules:
+    - host: pageindex.aiwithsalil.work
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: pageindex-mcp
+                port:
+                  number: 8201
