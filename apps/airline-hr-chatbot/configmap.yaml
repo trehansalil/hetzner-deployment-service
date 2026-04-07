@@ -343,6 +343,7 @@ data:
             namespaces:
               names:
                 - hr-chatbot
+                - pageindex-mcp
 
         relabel_configs:
           - source_labels: [__meta_kubernetes_pod_label_app]
@@ -424,9 +425,9 @@ data:
     apiVersion: 1
 
     providers:
-      - name: "HR Chatbot"
+      - name: "Applications"
         orgId: 1
-        folder: "HR Chatbot"
+        folder: "Applications"
         type: file
         disableDeletion: false
         updateIntervalSeconds: 30
@@ -1116,5 +1117,129 @@ data:
       "timezone": "browser",
       "title": "HR Chatbot — Full Observability",
       "uid": "hr-chatbot-full",
+      "version": 1
+    }
+  pageindex_mcp_overview.json: |
+    {
+      "description": "PageIndex MCP Server — log monitoring and service health",
+      "editable": true,
+      "graphTooltip": 1,
+      "id": null,
+      "links": [],
+      "panels": [
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+          "id": 1,
+          "title": "MCP Server Logs",
+          "type": "row"
+        },
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "gridPos": { "h": 14, "w": 24, "x": 0, "y": 1 },
+          "id": 2,
+          "options": {
+            "dedupStrategy": "none",
+            "enableLogDetails": true,
+            "prettifyLogMessage": true,
+            "showCommonLabels": false,
+            "showLabels": false,
+            "showTime": true,
+            "sortOrder": "Descending",
+            "wrapLogMessage": true
+          },
+          "targets": [
+            {
+              "datasource": { "type": "loki", "uid": "loki" },
+              "expr": "{namespace=\"pageindex-mcp\", service=\"pageindex-mcp\"}",
+              "refId": "A"
+            }
+          ],
+          "title": "All Logs",
+          "type": "logs"
+        },
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 15 },
+          "id": 3,
+          "title": "Errors & Warnings",
+          "type": "row"
+        },
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "gridPos": { "h": 12, "w": 24, "x": 0, "y": 16 },
+          "id": 4,
+          "options": {
+            "dedupStrategy": "signature",
+            "enableLogDetails": true,
+            "prettifyLogMessage": true,
+            "showCommonLabels": false,
+            "showLabels": true,
+            "showTime": true,
+            "sortOrder": "Descending",
+            "wrapLogMessage": true
+          },
+          "targets": [
+            {
+              "datasource": { "type": "loki", "uid": "loki" },
+              "expr": "{namespace=\"pageindex-mcp\", service=\"pageindex-mcp\"} | json | drop __error__, __error_details__ | level=~\"error|warning\" | line_format \"[{{.level}}] {{.message}}\"",
+              "refId": "A"
+            }
+          ],
+          "title": "Warnings & Errors",
+          "type": "logs"
+        },
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 28 },
+          "id": 5,
+          "title": "Log Volume",
+          "type": "row"
+        },
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "fieldConfig": {
+            "defaults": { "color": { "mode": "palette-classic" }, "unit": "short" },
+            "overrides": []
+          },
+          "gridPos": { "h": 10, "w": 24, "x": 0, "y": 29 },
+          "id": 6,
+          "options": {
+            "tooltip": { "mode": "multi" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["sum"] }
+          },
+          "targets": [
+            {
+              "datasource": { "type": "loki", "uid": "loki" },
+              "expr": "sum(count_over_time({namespace=\"pageindex-mcp\", service=\"pageindex-mcp\"} | json | drop __error__, __error_details__ | level=\"error\" [5m]))",
+              "legendFormat": "errors",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "loki", "uid": "loki" },
+              "expr": "sum(count_over_time({namespace=\"pageindex-mcp\", service=\"pageindex-mcp\"} | json | drop __error__, __error_details__ | level=\"warning\" [5m]))",
+              "legendFormat": "warnings",
+              "refId": "B"
+            },
+            {
+              "datasource": { "type": "loki", "uid": "loki" },
+              "expr": "sum(count_over_time({namespace=\"pageindex-mcp\", service=\"pageindex-mcp\"} | json | drop __error__, __error_details__ | level=\"info\" [5m]))",
+              "legendFormat": "info",
+              "refId": "C"
+            }
+          ],
+          "title": "Log Volume by Level",
+          "type": "timeseries"
+        }
+      ],
+      "refresh": "30s",
+      "schemaVersion": 39,
+      "tags": ["pageindex-mcp"],
+      "templating": { "list": [] },
+      "time": { "from": "now-1h", "to": "now" },
+      "timepicker": {},
+      "timezone": "browser",
+      "title": "PageIndex MCP Overview",
+      "uid": "pageindex-mcp-overview",
       "version": 1
     }
