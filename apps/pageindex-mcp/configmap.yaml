@@ -9,3 +9,4 @@ data:
   MINIO_SECURE: "false"
   MCP_HOST: "0.0.0.0"
   MCP_PORT: "8201"
+  REDIS_URL: "redis://neonatal-care-redis.neonatal-care:6379/1"
