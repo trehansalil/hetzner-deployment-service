@@ -8,7 +8,7 @@ spec:
   strategy:
     type: RollingUpdate
     rollingUpdate:
-      maxSurge: 1
+      maxSurge: 0
       maxUnavailable: 1
   selector:
     matchLabels:
@@ -46,8 +46,8 @@ spec:
             failureThreshold: 3
           resources:
             requests:
-              cpu: "500m"
-              memory: "512Mi"
+              cpu: "200m"
+              memory: "256Mi"
             limits:
-              cpu: "2000m"
+              cpu: "1000m"
               memory: "2Gi"
