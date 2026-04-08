@@ -1,27 +1,62 @@
+# Traefik IngressRoute with sticky sessions for MCP session affinity.
+# MCP's streamable-http transport is stateful — each session must stay on the
+# same pod. The sticky cookie ensures Traefik routes all requests within an
+# MCP session to the pod that created it.
+#
 # Prerequisites:
 #   1. cert-manager installed and letsencrypt-prod ClusterIssuer configured (make cluster-init)
 #   2. DNS A record: pageindex.aiwithsalil.work -> Hetzner server IP
-apiVersion: networking.k8s.io/v1
-kind: Ingress
+
+# --- HTTPS route (primary) ---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
 metadata:
   name: pageindex-mcp
   namespace: pageindex-mcp
-  annotations:
-    cert-manager.io/cluster-issuer: "letsencrypt-prod"
 spec:
-  ingressClassName: traefik
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`pageindex.aiwithsalil.work`)
+      kind: Rule
+      services:
+        - name: pageindex-mcp
+          port: 8201
+          sticky:
+            cookie:
+              name: mcp_affinity
+              secure: true
+              httpOnly: true
+              sameSite: none
   tls:
-    - hosts:
-        - pageindex.aiwithsalil.work
-      secretName: pageindex-mcp-tls
-  rules:
-    - host: pageindex.aiwithsalil.work
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: pageindex-mcp
-                port:
-                  number: 8201
+    secretName: pageindex-mcp-tls
+
+---
+# --- HTTP -> HTTPS redirect ---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: redirect-https
+  namespace: pageindex-mcp
+spec:
+  redirectScheme:
+    scheme: https
+    permanent: true
+
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: pageindex-mcp-http
+  namespace: pageindex-mcp
+spec:
+  entryPoints:
+    - web
+  routes:
+    - match: Host(`pageindex.aiwithsalil.work`)
+      kind: Rule
+      middlewares:
+        - name: redirect-https
+      services:
+        - name: pageindex-mcp
+          port: 8201

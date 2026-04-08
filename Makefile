@@ -210,7 +210,9 @@ deploy-pageindex:
 	$(KUBECTL) apply -f apps/pageindex-mcp/configmap.yaml -n $(PAGEINDEX_NS)
 	$(KUBECTL) apply -f apps/pageindex-mcp/deployment.yaml -n $(PAGEINDEX_NS)
 	$(KUBECTL) apply -f apps/pageindex-mcp/service.yaml -n $(PAGEINDEX_NS)
+	$(KUBECTL) apply -f apps/pageindex-mcp/certificate.yaml -n $(PAGEINDEX_NS)
 	$(KUBECTL) apply -f apps/pageindex-mcp/ingress.yaml -n $(PAGEINDEX_NS)
+	$(KUBECTL) delete ingress pageindex-mcp -n $(PAGEINDEX_NS) --ignore-not-found
 	$(KUBECTL) apply -f apps/pageindex-mcp/cronjob-pod-cleanup.yaml -n $(PAGEINDEX_NS)
 
 .PHONY: rollout-pageindex

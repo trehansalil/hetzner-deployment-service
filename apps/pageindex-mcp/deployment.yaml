@@ -4,11 +4,11 @@ metadata:
   name: pageindex-mcp
   namespace: pageindex-mcp
 spec:
-  replicas: 1
+  replicas: 2
   strategy:
     type: RollingUpdate
     rollingUpdate:
-      maxSurge: 0
+      maxSurge: 1
       maxUnavailable: 1
   selector:
     matchLabels:

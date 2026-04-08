@@ -93,7 +93,9 @@ jobs:
           kubectl apply -f apps/pageindex-mcp/deployment.yaml -n pageindex-mcp
           kubectl apply -f apps/pageindex-mcp/worker-deployment.yaml -n pageindex-mcp
           kubectl apply -f apps/pageindex-mcp/service.yaml -n pageindex-mcp
+          kubectl apply -f apps/pageindex-mcp/certificate.yaml -n pageindex-mcp
           kubectl apply -f apps/pageindex-mcp/ingress.yaml -n pageindex-mcp
+          kubectl delete ingress pageindex-mcp -n pageindex-mcp --ignore-not-found
           kubectl apply -f apps/pageindex-mcp/cronjob-pod-cleanup.yaml -n pageindex-mcp
 
       - name: Update image tag (rolling deploy) — neonatal-care

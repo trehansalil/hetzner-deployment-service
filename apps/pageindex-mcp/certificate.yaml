@@ -1,0 +1,15 @@
+# Explicit Certificate resource for use with Traefik IngressRoute.
+# (cert-manager's ingress-shim only auto-creates Certificates for Ingress
+# objects, not Traefik IngressRoutes.)
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: pageindex-mcp-tls
+  namespace: pageindex-mcp
+spec:
+  secretName: pageindex-mcp-tls
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+  dnsNames:
+    - pageindex.aiwithsalil.work
