@@ -91,6 +91,7 @@ jobs:
           kubectl apply -f apps/pageindex-mcp/namespace.yaml
           kubectl apply -f apps/pageindex-mcp/configmap.yaml -n pageindex-mcp
           kubectl apply -f apps/pageindex-mcp/deployment.yaml -n pageindex-mcp
+          kubectl apply -f apps/pageindex-mcp/worker-deployment.yaml -n pageindex-mcp
           kubectl apply -f apps/pageindex-mcp/service.yaml -n pageindex-mcp
           kubectl apply -f apps/pageindex-mcp/ingress.yaml -n pageindex-mcp
           kubectl apply -f apps/pageindex-mcp/cronjob-pod-cleanup.yaml -n pageindex-mcp
@@ -126,7 +127,11 @@ jobs:
           kubectl set image deployment/pageindex-mcp \
             pageindex-mcp=ghcr.io/trehansalil/pageindex-mcp:${{ steps.vars.outputs.image_tag }} \
             -n pageindex-mcp
+          kubectl set image deployment/pageindex-mcp-worker \
+            worker=ghcr.io/trehansalil/pageindex-mcp:${{ steps.vars.outputs.image_tag }} \
+            -n pageindex-mcp
           kubectl rollout status deployment/pageindex-mcp -n pageindex-mcp --timeout=300s
+          kubectl rollout status deployment/pageindex-mcp-worker -n pageindex-mcp --timeout=300s
 
       - name: Post-deploy pod cleanup — neonatal-care
         if: steps.vars.outputs.app == 'neonatal-care'
