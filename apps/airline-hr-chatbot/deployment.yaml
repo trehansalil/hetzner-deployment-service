@@ -59,11 +59,11 @@ spec:
             failureThreshold: 3
           resources:
             requests:
-              cpu: "250m"
-              memory: "512Mi"
+              cpu: "100m"
+              memory: "64Mi"
             limits:
-              cpu: "1000m"
-              memory: "2Gi"
+              cpu: "500m"
+              memory: "256Mi"
       volumes:
         - name: postgres-data
           persistentVolumeClaim:
@@ -125,11 +125,11 @@ spec:
             failureThreshold: 3
           resources:
             requests:
-              cpu: "100m"
-              memory: "128Mi"
+              cpu: "50m"
+              memory: "64Mi"
             limits:
-              cpu: "500m"
-              memory: "512Mi"
+              cpu: "250m"
+              memory: "256Mi"
 ---
 # ─── Adminer (PostgreSQL web UI) ──────────────────────────────────────────────
 apiVersion: apps/v1
@@ -266,11 +266,11 @@ spec:
             failureThreshold: 3
           resources:
             requests:
-              cpu: "500m"
-              memory: "1Gi"
+              cpu: "200m"
+              memory: "256Mi"
             limits:
-              cpu: "2000m"
-              memory: "4Gi"
+              cpu: "1000m"
+              memory: "1Gi"
       volumes:
         - name: logs
           emptyDir: {}
@@ -303,7 +303,7 @@ spec:
           args:
             - --config.file=/etc/prometheus/prometheus.yml
             - --storage.tsdb.path=/prometheus
-            - --storage.tsdb.retention.time=15d
+            - --storage.tsdb.retention.time=7d
             - --web.enable-lifecycle
           ports:
             - name: http
@@ -327,11 +327,11 @@ spec:
             periodSeconds: 15
           resources:
             requests:
-              cpu: "250m"
-              memory: "512Mi"
+              cpu: "100m"
+              memory: "64Mi"
             limits:
-              cpu: "1000m"
-              memory: "2Gi"
+              cpu: "500m"
+              memory: "256Mi"
       volumes:
         - name: config
           configMap:
@@ -385,11 +385,11 @@ spec:
             periodSeconds: 15
           resources:
             requests:
-              cpu: "200m"
-              memory: "256Mi"
+              cpu: "100m"
+              memory: "128Mi"
             limits:
               cpu: "500m"
-              memory: "1Gi"
+              memory: "256Mi"
       volumes:
         - name: config
           configMap:
@@ -469,11 +469,11 @@ spec:
             periodSeconds: 15
           resources:
             requests:
-              cpu: "100m"
-              memory: "256Mi"
+              cpu: "50m"
+              memory: "64Mi"
             limits:
-              cpu: "500m"
-              memory: "512Mi"
+              cpu: "250m"
+              memory: "256Mi"
       volumes:
         - name: data
           persistentVolumeClaim:

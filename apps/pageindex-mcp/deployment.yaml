@@ -4,7 +4,7 @@ metadata:
   name: pageindex-mcp
   namespace: pageindex-mcp
 spec:
-  replicas: 2
+  replicas: 1
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -50,4 +50,4 @@ spec:
               memory: "256Mi"
             limits:
               cpu: "1000m"
-              memory: "2Gi"
+              memory: "512Mi"

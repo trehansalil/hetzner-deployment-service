@@ -64,7 +64,7 @@ spec:
             memory: "512Mi"
             cpu: "250m"
           limits:
-            memory: "2Gi"
+            memory: "1536Mi"
             cpu: "1000m"
       volumes:
       - name: clickhouse-data
@@ -131,11 +131,11 @@ spec:
           periodSeconds: 10
         resources:
           requests:
-            memory: "256Mi"
-            cpu: "100m"
+            memory: "128Mi"
+            cpu: "50m"
           limits:
-            memory: "1Gi"
-            cpu: "500m"
+            memory: "256Mi"
+            cpu: "250m"
       volumes:
       - name: minio-data
         persistentVolumeClaim:
@@ -260,7 +260,7 @@ spec:
           - uv
           - run
           - gunicorn
-          - --workers=4
+          - --workers=2
           - --worker-class=gevent
           - --worker-connections=1000
           - --bind=0.0.0.0:5000

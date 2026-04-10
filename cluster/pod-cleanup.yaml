@@ -1,0 +1,273 @@
+# Pod cleanup CronJobs for namespaces that don't have their own.
+# Mirrors the pattern used in hr-chatbot, neonatal-care, and pageindex-mcp.
+# Runs every 15 minutes; deletes Failed/Succeeded/Unknown pods.
+---
+# ── cert-manager ──────────────────────────────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pod-cleanup
+  namespace: cert-manager
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pod-cleanup
+  namespace: cert-manager
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pod-cleanup
+  namespace: cert-manager
+subjects:
+  - kind: ServiceAccount
+    name: pod-cleanup
+    namespace: cert-manager
+roleRef:
+  kind: Role
+  name: pod-cleanup
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: pod-cleanup
+  namespace: cert-manager
+spec:
+  schedule: "*/15 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 300
+      template:
+        spec:
+          serviceAccountName: pod-cleanup
+          restartPolicy: OnFailure
+          containers:
+            - name: kubectl
+              image: alpine/k8s:1.29.7
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  cpu: 100m
+                  memory: 64Mi
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -e
+                  NS="cert-manager"
+                  echo "=== Pod cleanup run: $(date) ==="
+
+                  FAILED=$(kubectl get pods -n "$NS" \
+                    --field-selector=status.phase==Failed \
+                    -o jsonpath='{.items[*].metadata.name}')
+                  if [ -n "$FAILED" ]; then
+                    echo "Deleting failed/evicted pods: $FAILED"
+                    echo "$FAILED" | tr ' ' '\n' | \
+                      xargs kubectl delete pod -n "$NS" --ignore-not-found
+                  else
+                    echo "No failed/evicted pods found."
+                  fi
+
+                  SUCCEEDED=$(kubectl get pods -n "$NS" \
+                    --field-selector=status.phase==Succeeded \
+                    -o jsonpath='{.items[*].metadata.name}')
+                  if [ -n "$SUCCEEDED" ]; then
+                    echo "Deleting succeeded pods: $SUCCEEDED"
+                    echo "$SUCCEEDED" | tr ' ' '\n' | \
+                      xargs kubectl delete pod -n "$NS" --ignore-not-found
+                  else
+                    echo "No succeeded pods found."
+                  fi
+
+                  echo "=== Cleanup complete ==="
+---
+# ── default ───────────────────────────────────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pod-cleanup
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pod-cleanup
+  namespace: default
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pod-cleanup
+  namespace: default
+subjects:
+  - kind: ServiceAccount
+    name: pod-cleanup
+    namespace: default
+roleRef:
+  kind: Role
+  name: pod-cleanup
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: pod-cleanup
+  namespace: default
+spec:
+  schedule: "*/15 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 300
+      template:
+        spec:
+          serviceAccountName: pod-cleanup
+          restartPolicy: OnFailure
+          containers:
+            - name: kubectl
+              image: alpine/k8s:1.29.7
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  cpu: 100m
+                  memory: 64Mi
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -e
+                  NS="default"
+                  echo "=== Pod cleanup run: $(date) ==="
+
+                  FAILED=$(kubectl get pods -n "$NS" \
+                    --field-selector=status.phase==Failed \
+                    -o jsonpath='{.items[*].metadata.name}')
+                  if [ -n "$FAILED" ]; then
+                    echo "Deleting failed/evicted pods: $FAILED"
+                    echo "$FAILED" | tr ' ' '\n' | \
+                      xargs kubectl delete pod -n "$NS" --ignore-not-found
+                  else
+                    echo "No failed/evicted pods found."
+                  fi
+
+                  SUCCEEDED=$(kubectl get pods -n "$NS" \
+                    --field-selector=status.phase==Succeeded \
+                    -o jsonpath='{.items[*].metadata.name}')
+                  if [ -n "$SUCCEEDED" ]; then
+                    echo "Deleting succeeded pods: $SUCCEEDED"
+                    echo "$SUCCEEDED" | tr ' ' '\n' | \
+                      xargs kubectl delete pod -n "$NS" --ignore-not-found
+                  else
+                    echo "No succeeded pods found."
+                  fi
+
+                  echo "=== Cleanup complete ==="
+---
+# ── kube-system ───────────────────────────────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pod-cleanup
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pod-cleanup
+  namespace: kube-system
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pod-cleanup
+  namespace: kube-system
+subjects:
+  - kind: ServiceAccount
+    name: pod-cleanup
+    namespace: kube-system
+roleRef:
+  kind: Role
+  name: pod-cleanup
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: pod-cleanup
+  namespace: kube-system
+spec:
+  schedule: "*/15 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 300
+      template:
+        spec:
+          serviceAccountName: pod-cleanup
+          restartPolicy: OnFailure
+          containers:
+            - name: kubectl
+              image: alpine/k8s:1.29.7
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  cpu: 100m
+                  memory: 64Mi
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -e
+                  NS="kube-system"
+                  echo "=== Pod cleanup run: $(date) ==="
+
+                  FAILED=$(kubectl get pods -n "$NS" \
+                    --field-selector=status.phase==Failed \
+                    -o jsonpath='{.items[*].metadata.name}')
+                  if [ -n "$FAILED" ]; then
+                    echo "Deleting failed/evicted pods: $FAILED"
+                    echo "$FAILED" | tr ' ' '\n' | \
+                      xargs kubectl delete pod -n "$NS" --ignore-not-found
+                  else
+                    echo "No failed/evicted pods found."
+                  fi
+
+                  SUCCEEDED=$(kubectl get pods -n "$NS" \
+                    --field-selector=status.phase==Succeeded \
+                    -o jsonpath='{.items[*].metadata.name}')
+                  if [ -n "$SUCCEEDED" ]; then
+                    echo "Deleting succeeded pods: $SUCCEEDED"
+                    echo "$SUCCEEDED" | tr ' ' '\n' | \
+                      xargs kubectl delete pod -n "$NS" --ignore-not-found
+                  else
+                    echo "No succeeded pods found."
+                  fi
+
+                  echo "=== Cleanup complete ==="
