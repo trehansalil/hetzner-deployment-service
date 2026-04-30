@@ -209,6 +209,7 @@ deploy-pageindex:
 	$(KUBECTL) apply -f apps/pageindex-mcp/namespace.yaml
 	$(KUBECTL) apply -f apps/pageindex-mcp/configmap.yaml -n $(PAGEINDEX_NS)
 	$(KUBECTL) apply -f apps/pageindex-mcp/deployment.yaml -n $(PAGEINDEX_NS)
+	$(KUBECTL) apply -f apps/pageindex-mcp/worker-deployment.yaml -n $(PAGEINDEX_NS)
 	$(KUBECTL) apply -f apps/pageindex-mcp/service.yaml -n $(PAGEINDEX_NS)
 	$(KUBECTL) apply -f apps/pageindex-mcp/certificate.yaml -n $(PAGEINDEX_NS)
 	$(KUBECTL) apply -f apps/pageindex-mcp/ingress.yaml -n $(PAGEINDEX_NS)
@@ -220,7 +221,11 @@ rollout-pageindex:
 	$(KUBECTL) set image deployment/pageindex-mcp \
 		pageindex-mcp=$(PAGEINDEX_IMAGE):$(PAGEINDEX_IMAGE_TAG) \
 		-n $(PAGEINDEX_NS)
+	$(KUBECTL) set image deployment/pageindex-mcp-worker \
+		worker=$(PAGEINDEX_IMAGE):$(PAGEINDEX_IMAGE_TAG) \
+		-n $(PAGEINDEX_NS)
 	$(KUBECTL) rollout status deployment/pageindex-mcp -n $(PAGEINDEX_NS) --timeout=300s
+	$(KUBECTL) rollout status deployment/pageindex-mcp-worker -n $(PAGEINDEX_NS) --timeout=300s
 
 .PHONY: status-pageindex
 status-pageindex:
@@ -233,6 +238,7 @@ logs-pageindex:
 .PHONY: rollback-pageindex
 rollback-pageindex:
 	$(KUBECTL) rollout undo deployment/pageindex-mcp -n $(PAGEINDEX_NS)
+	$(KUBECTL) rollout undo deployment/pageindex-mcp-worker -n $(PAGEINDEX_NS)
 
 .PHONY: ghcr-secret-pageindex
 ghcr-secret-pageindex:
