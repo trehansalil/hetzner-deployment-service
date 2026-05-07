@@ -4,63 +4,45 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Purpose
 
-This is a **Kubernetes GitOps deployment repository** for two applications running on a Hetzner server with k3s. It contains no application source code — only Kubernetes manifests and deployment automation.
+This is a **Kubernetes GitOps deployment repository** for three applications running on a single-node Hetzner server with k3s. It contains no application source code — only Kubernetes manifests and deployment automation. Source code lives in separate repos that build images, push to GHCR, and fire `repository_dispatch` events here.
 
 ## Common Commands
 
 ### Cluster Bootstrap (one-time)
 ```bash
-make cluster-init        # Install Traefik (k3s built-in), cert-manager, Let's Encrypt ClusterIssuers
+make cluster-init        # Apply namespaces, install ingress-nginx + cert-manager, create Let's Encrypt ClusterIssuers, configure Traefik HTTP→HTTPS
 ```
+Note: `cluster-init` installs `ingress-nginx`, but live ingresses target the k3s built-in **Traefik** controller (`ingressClassName: traefik`). The nginx install is legacy/unused — the active controller for all apps is Traefik.
 
-### Neonatal Care App
-```bash
-make deploy-neonatal                     # Apply all manifests (full deploy)
-make rollout-neonatal IMAGE_TAG=<sha>    # Rolling update with new image tag
-make status-neonatal                     # Show pods, services, ingress status
-make logs-neonatal                       # Tail backend logs
-make rollback-neonatal                   # Rollback to previous revision
-make init-clickhouse                     # One-time database schema initialization
-make destroy-neonatal                    # DELETE entire namespace (destructive)
-```
+### Per-app targets (uniform Makefile pattern)
+Every app has the same target shape: `deploy-<app>`, `rollout-<app>` (with `IMAGE_TAG=<sha>` or app-specific `HR_IMAGE_TAG` / `PAGEINDEX_IMAGE_TAG`), `status-<app>`, `logs-<app>`, `rollback-<app>`, `destroy-<app>`, `ghcr-secret-<app> GITHUB_PAT=<pat>`, `k8s-secrets-<app>`. Substitute `<app>` with `neonatal`, `hr`, or `pageindex`.
 
-### Airline HR Chatbot App
-```bash
-make deploy-hr                           # Apply all manifests (full deploy, includes RBAC)
-make rollout-hr IMAGE_TAG=<sha>          # Rolling update (app + oracle deployments)
-make status-hr                           # Show pods, services, ingress status
-make logs-hr                             # Tail app logs
-make rollback-hr                         # Rollback to previous revision
-make ghcr-secret-hr GITHUB_PAT=<token>  # Create docker-registry secret for private GHCR
-make k8s-secrets-hr                      # Apply app-secrets from secret.yaml
-make ingest-hr                           # Run data ingest pipeline
-make shell-hr                            # SSH into app pod
-make port-app-hr                         # Port-forward app to :9040
-make port-grafana-hr                     # Port-forward Grafana to :3000
-make port-prometheus-hr                  # Port-forward Prometheus to :9090
-make port-adminer-hr                     # Port-forward Adminer to :8080
-make destroy-hr                          # DELETE namespace + ClusterRole/Binding (destructive)
-```
+App-specific extras:
+- **Neonatal**: `make init-clickhouse` (one-time DB schema), `make clean-pods-neonatal`, `make status-neonatal-resources` (ResourceQuota + LimitRange).
+- **HR**: `make ingest-hr` / `make ingest-recreate-hr` (run vector-DB ingest in-pod), `make shell-hr`, port-forwards `port-app-hr` (9040), `port-grafana-hr` (3000), `port-prometheus-hr` (9090), `port-adminer-hr` (8080), `make clean-pods-hr`.
 
 ### Manual Secret Setup
+`secret.yaml` files are **gitignored**. Each app ships a `secret.yaml.example` template:
 ```bash
-# Neonatal Care
-cp apps/neonatal-care/secret.yaml.example apps/neonatal-care/secret.yaml
-kubectl apply -f apps/neonatal-care/secret.yaml -n neonatal-care
-
-# Airline HR Chatbot
-cp apps/airline-hr-chatbot/secret.yaml.example apps/airline-hr-chatbot/secret.yaml
-make ghcr-secret-hr GITHUB_PAT=<token>   # Required to pull private GHCR images
-make k8s-secrets-hr
+cp apps/<app>/secret.yaml.example apps/<app>/secret.yaml
+# fill in base64 values: echo -n 'value' | base64
+make k8s-secrets-<app>
+# For private GHCR images (hr, pageindex):
+make ghcr-secret-<app> GITHUB_PAT=<token>
 ```
 
 ## Architecture
 
 ### Directory Layout
-- `cluster/` — cluster-wide bootstrap: namespaces, Traefik HelmChartConfig (HTTP→HTTPS), cert-manager, ACME issuers
-- `apps/neonatal-care/` — configmap, secret template, PVCs, deployments, services, ingress, init job
-- `apps/airline-hr-chatbot/` — configmap (PostgreSQL init SQL), secret template, PVCs, deployments, StatefulSet, DaemonSet, RBAC, services, ingresses
-- `.github/workflows/deploy.yml` — triggered by `repository_dispatch` (from source repos) or manual `workflow_dispatch`
+- `cluster/` — cluster-wide bootstrap: namespaces, Traefik HelmChartConfig (HTTP→HTTPS redirect), cert-manager install, ACME ClusterIssuers (`letsencrypt-prod`, `letsencrypt-staging`), `pod-cleanup.yaml`.
+- `apps/neonatal-care/` — configmap, secret template, PVCs, deployments, service, ingress, ClickHouse init job, **resourcequota + limitrange**, pod-cleanup CronJob.
+- `apps/airline-hr-chatbot/` — configmap (PostgreSQL init SQL), secret template, PVCs, deployments, StatefulSet (Postgres), DaemonSet (promtail), **cluster-scoped RBAC**, services, ingresses, pod-cleanup CronJob.
+- `apps/pageindex-mcp/` — configmap, secret template, server + worker deployments, service, **explicit Certificate**, Traefik **IngressRoute** (sticky sessions), pod-cleanup CronJob.
+- `.github/workflows/deploy.yml` — triggered by `repository_dispatch` (types: `neonatal-care-image-updated`, `airline-hr-chatbot-image-updated`, `pageindex-mcp-image-updated`) or manual `workflow_dispatch`. Selects the app via `client_payload.app` / `inputs.app`, applies manifests, runs `kubectl set image` for rolling update. Uses `secrets.KUBECONFIG_B64`.
+- `docs/superpowers/{plans,specs}/` — design docs (currently: pageindex-mcp CI/CD).
+
+### Adding a new app
+Mirror an existing app directory, add a `deploy-<app>` block to the `Makefile`, register the app+namespace in `.github/workflows/deploy.yml` (three places: dispatch types, manifest apply step, image rollout step), and add the namespace to `cluster/namespaces.yaml`.
 
 ### Neonatal Care — Request Flow
 ```
@@ -71,7 +53,7 @@ Internet → Traefik (TLS termination + HTTP→HTTPS)
             /minio-console/   → MinIO console :9001
             /automation/      → n8n :5678
 ```
-Static files are copied from the backend image by an nginx initContainer at startup (emptyDir shared volume). The ConfigMap holds both env vars and `nginx.conf`.
+Static files are copied from the backend image by an nginx initContainer at startup (emptyDir shared volume). The ConfigMap holds both env vars and `nginx.conf`. **Both** the backend and nginx images get bumped during `rollout-neonatal` (the nginx pod's `copy-static` initContainer pulls assets from the same backend image).
 
 ### Neonatal Care — Services (`neonatal-care` namespace)
 | Service | Port | Storage |
@@ -83,28 +65,51 @@ Static files are copied from the backend image by an nginx initContainer at star
 | n8n | 5678 | 2Gi |
 | nginx | 80 | — |
 
+A namespace-scoped `ResourceQuota` (3Gi/1500m requests, 7Gi/5000m limits, 20 pods, 10 PVCs) and `LimitRange` (default container: 128Mi/100m req, 512Mi/500m lim) are applied before workloads. These two are unique to neonatal — workloads will fail to schedule if they exceed the quota.
+
 ### Airline HR Chatbot — Services (`hr-chatbot` namespace)
 | Service | Port | Storage |
 |---------|------|---------|
 | PostgreSQL (StatefulSet, pgvector:pg16) | 5432 | 10Gi |
-| Oracle Mock Server (FastAPI) | 8001 | — |
-| Chainlit app | 9040 (UI), 9091 (metrics) | — |
+| Oracle Mock Server (FastAPI, uvicorn) | 8001 | — |
+| Chainlit app | 9040 (UI), 9091 (metrics + `/health`) | — |
 | Adminer | 8080 | — |
-| Prometheus | 9090 | 20Gi |
-| Loki | 3100 | 10Gi |
-| Grafana | 3000 | 5Gi |
-| Promtail (DaemonSet) | — | — |
+| Prometheus | 9090 | 20Gi (`Recreate` strategy — TSDB lock) |
+| Loki | 3100 | 10Gi (`Recreate` strategy — compactor lock) |
+| Grafana | 3000 | 5Gi (`Recreate` strategy — SQLite lock) |
+| Promtail (DaemonSet) | 9080 | hostPath (read-only) |
 
-Chainlit waits for both Postgres and the Oracle Mock Server via init containers. Promtail requires a ClusterRole (get/list/watch pods/nodes/namespaces) to discover log targets; `make destroy-hr` also cleans up the ClusterRoleBinding.
+Chainlit waits for both Postgres and the Oracle Mock Server via init containers. Postgres bootstraps from `postgres-init-sql` ConfigMap mounted at `/docker-entrypoint-initdb.d/init.sql`. The HR app itself runs at **replicas: 1** because Chainlit holds session state in-process. Promtail requires a **ClusterRole** (get/list/watch on pods/nodes/namespaces) for k8s service discovery; this is the only cluster-scoped resource owned by an app, so `make destroy-hr` deletes the ClusterRole + ClusterRoleBinding explicitly (`kubectl delete namespace` won't).
+
+### PageIndex MCP — Services (`pageindex-mcp` namespace)
+| Service | Port | Notes |
+|---------|------|-------|
+| MCP server | 8201 | streamable-http transport, **stateful per session** |
+| Worker | — | `arq` queue worker (no port) |
+
+Architectural notes that are easy to miss:
+- **Cross-namespace dependencies**: server + worker reach MinIO and Redis from the `neonatal-care` namespace via FQDN service names (`neonatal-care-minio.neonatal-care:9000`, `neonatal-care-redis.neonatal-care:6379/1`). Neonatal must be deployed first.
+- **Ingress is a Traefik `IngressRoute`** (not a standard `Ingress`), with **sticky sessions** (`mcp_affinity` cookie). MCP's streamable-http transport requires session affinity to a single pod. cert-manager's ingress-shim does not auto-issue certs for IngressRoutes, so `certificate.yaml` declares the `Certificate` resource explicitly.
+- **Azure OpenAI prefix mismatch**: the server uses `AsyncAzureOpenAI` directly and wants the bare deployment name (e.g. `gpt-4.1`); the worker uses `litellm` via the pageindex library and needs the `azure/` prefix. The ConfigMap holds bare names; `worker-deployment.yaml` overrides `PAGEINDEX_*MODEL` env vars to add the prefix. Both `OPENAI_API_KEY` and `AZURE_API_KEY` must be set to the same value when `OPENAI_BASE_URL` points at Azure.
 
 ### TLS & Networking
-- **Ingress class**: `traefik` (k3s built-in)
-- **TLS**: cert-manager v1.14.5 with Let's Encrypt HTTP-01 challenge
-- **Issuers**: `letsencrypt-prod` (production) and `letsencrypt-staging` (rate-limit-free testing)
-- **Domains**: `neonate-logger.saliltrehan.com`, `airline-hr.saliltrehan.com`, `grafana-hr.saliltrehan.com`, `adminer-hr.saliltrehan.com`
+- **Ingress class**: `traefik` (k3s built-in). Standard Ingresses use `ingressClassName: traefik`; PageIndex uses native Traefik `IngressRoute` CRDs.
+- **TLS**: cert-manager v1.14.5 with Let's Encrypt HTTP-01 challenge.
+- **Issuers**: `letsencrypt-prod` and `letsencrypt-staging` (rate-limit-free testing).
+- **HTTP→HTTPS** redirect is global, set on Traefik via `cluster/traefik-config.yaml` (`HelmChartConfig` overlay in `kube-system`).
+- **Domains**: `neonate-logger.saliltrehan.com`, `airline-hr.saliltrehan.com`, `grafana-hr.saliltrehan.com`, `adminer-hr.saliltrehan.com`, `pageindex.aiwithsalil.work`.
 
 ### Storage
-Default storage class is k3s `local-path` (single-node HostPath). To use Hetzner block storage on multi-node clusters, uncomment `storageClassName: hcloud-volumes` in PVC files.
+Default storage class is k3s `local-path` (single-node HostPath). To use Hetzner block storage on multi-node clusters, uncomment `storageClassName: hcloud-volumes` in PVC files. **Stateful workloads with file locks** (Prometheus, Loki, Grafana) use `strategy: Recreate` because two pods cannot mount the same `local-path` PVC simultaneously.
+
+### Pod Cleanup
+Each app namespace ships its own `cronjob-pod-cleanup.yaml` (every 15 min, dedicated ServiceAccount + namespace-scoped Role) that deletes pods in `Failed` or `Succeeded` phase. The deploy workflow also runs cleanup post-deploy. Use `make clean-pods-<app>` for a manual sweep.
 
 ### Deployment Pipeline
-Source repos (`neonatal-care-repo`, `airline-hr-chatbot`) build images and push to GHCR (`ghcr.io/trehansalil/...`), then fire a `repository_dispatch` event here. The deploy workflow decodes `secrets.KUBECONFIG_B64`, applies manifests, and runs `kubectl set image` for a rolling update. The HR chatbot images are in a private GHCR registry requiring the `ghcr-credentials` pull secret.
+Source repos (`neonatal-care-repo`, `airline-hr-chatbot`, `pageindex-mcp`) build images and push to GHCR (`ghcr.io/trehansalil/<app>:<sha>`), then fire `repository_dispatch` here. The deploy workflow decodes `secrets.KUBECONFIG_B64`, applies manifests, and runs `kubectl set image` for a rolling update. **HR chatbot and PageIndex** images are in private GHCR registries requiring the `ghcr-credentials` pull secret (created via `make ghcr-secret-<app>`).
+
+## Conventions
+
+- **Never commit `secret.yaml`** (gitignored). Use the `.example` template + `make k8s-secrets-<app>`.
+- When adding manifests, also update the corresponding `deploy-<app>` Makefile target **and** the `Apply k8s manifests — <app>` step in `.github/workflows/deploy.yml`. The Makefile and workflow apply the same files in the same order — keep them in sync.
+- Cluster-scoped resources (ClusterRole, ClusterRoleBinding, ClusterIssuer, Certificate when paired with non-Ingress routes) are not deleted by `kubectl delete namespace`. The `destroy-<app>` target must clean these up explicitly (see `destroy-hr` for the pattern).
