@@ -48,24 +48,30 @@ Mirror an existing app directory, add a `deploy-<app>` block to the `Makefile`, 
 ```
 Internet → Traefik (TLS termination + HTTP→HTTPS)
         → nginx (static SPA + reverse proxy)
-            /api/             → Flask backend :5000 (gunicorn/gevent, 4 workers)
+            /api/             → Flask backend :5000 (gunicorn/gevent, 2 workers)
             /minio/           → MinIO API :9000
             /minio-console/   → MinIO console :9001
             /automation/      → n8n :5678
 ```
-Static files are copied from the backend image by an nginx initContainer at startup (emptyDir shared volume). The ConfigMap holds both env vars and `nginx.conf`. **Both** the backend and nginx images get bumped during `rollout-neonatal` (the nginx pod's `copy-static` initContainer pulls assets from the same backend image).
+Static files are copied from the backend image by an nginx initContainer (`copy-static`) at startup into an emptyDir shared volume. The nginx ConfigMap (`default.conf`) holds the full reverse-proxy config including SSE pass-through (`X-Accel-Buffering: no`) and `sub_filter` URL rewrites for the n8n and MinIO console subpaths. **Both** the backend and nginx Deployments get bumped during `rollout-neonatal` because the nginx pod's `copy-static` initContainer pulls the same backend image. The backend uses `maxSurge: 0, maxUnavailable: 1` and `terminationGracePeriodSeconds: 60` so gunicorn drains in-flight requests under memory pressure.
 
 ### Neonatal Care — Services (`neonatal-care` namespace)
-| Service | Port | Storage |
-|---------|------|---------|
-| Flask backend | 5000 | — |
-| ClickHouse | 8123 (HTTP), 9000 (native) | 10Gi data + 2Gi logs |
-| MinIO | 9000 / 9001 | 20Gi |
-| Redis | 6379 | none |
-| n8n | 5678 | 2Gi |
-| nginx | 80 | — |
+| Service | Port | Storage | Strategy |
+|---------|------|---------|----------|
+| Flask backend (`uv run gunicorn`) | 5000 | — | RollingUpdate, maxSurge: 0 |
+| nginx | 80 | — | RollingUpdate, maxSurge: 0 |
+| ClickHouse | 8123 (HTTP), 9000 (native) | 10Gi data + 2Gi logs | **Recreate** (PVC lock) |
+| MinIO | 9000 / 9001 | 20Gi | **Recreate** (PVC lock) |
+| n8n | 5678 | 2Gi (SQLite) | **Recreate** (PVC lock) |
+| Redis | 6379 | none | RollingUpdate |
 
-A namespace-scoped `ResourceQuota` (3Gi/1500m requests, 7Gi/5000m limits, 20 pods, 10 PVCs) and `LimitRange` (default container: 128Mi/100m req, 512Mi/500m lim) are applied before workloads. These two are unique to neonatal — workloads will fail to schedule if they exceed the quota.
+A namespace-scoped `ResourceQuota` (3Gi/1500m requests, 7Gi/5000m limits, 20 pods, 10 PVCs) and `LimitRange` (default container: 128Mi/100m req, 512Mi/500m lim) are applied **before** workloads — overshooting the quota will block pod scheduling. Quota + LimitRange are unique to neonatal; the other namespaces are uncapped.
+
+The `make init-clickhouse` Job expects a ConfigMap **`neonatal-care-sql-init`** to already exist (it isn't in the repo). Populate it from the source repo's schema before running the job:
+```bash
+kubectl create configmap neonatal-care-sql-init \
+  --from-file=init_clickhouse.sql=<path-to-file> -n neonatal-care
+```
 
 ### Airline HR Chatbot — Services (`hr-chatbot` namespace)
 | Service | Port | Storage |
@@ -79,17 +85,23 @@ A namespace-scoped `ResourceQuota` (3Gi/1500m requests, 7Gi/5000m limits, 20 pod
 | Grafana | 3000 | 5Gi (`Recreate` strategy — SQLite lock) |
 | Promtail (DaemonSet) | 9080 | hostPath (read-only) |
 
-Chainlit waits for both Postgres and the Oracle Mock Server via init containers. Postgres bootstraps from `postgres-init-sql` ConfigMap mounted at `/docker-entrypoint-initdb.d/init.sql`. The HR app itself runs at **replicas: 1** because Chainlit holds session state in-process. Promtail requires a **ClusterRole** (get/list/watch on pods/nodes/namespaces) for k8s service discovery; this is the only cluster-scoped resource owned by an app, so `make destroy-hr` deletes the ClusterRole + ClusterRoleBinding explicitly (`kubectl delete namespace` won't).
+Chainlit waits for both Postgres and the Oracle Mock Server via init containers. The Chainlit app runs at **replicas: 1** because session state is held in-process. The Chainlit container exposes the UI on `:9040` and a separate metrics + `/health` endpoint on `:9091` (the readiness/liveness probes target `:9091`, and an `app-metrics` Service routes Prometheus to `:9091` while the `app` Service exposes only `:9040` to the Ingress).
+
+Postgres bootstraps from the **`postgres-init-sql` ConfigMap** mounted at `/docker-entrypoint-initdb.d/init.sql`. That ConfigMap is enormous (~1500 lines of SQL embedded in `configmap.yaml`) and contains: `vector` + `pg_trgm` extensions, the RAG tables (`knowledge_embeddings`, `session_embeddings`, `session_document_links`, `session_tabular_files`, `knowledge_tabular_files` — all with HNSW + GIN trigram indexes on `vector(2000)`), the Chainlit persistence tables (`User`, `Thread`, `Step`, `Element`, `Feedback`), and seed users (`EMP001`, `EMP002`, `EMP003`, `ADMIN001`). The init script is idempotent (`CREATE ... IF NOT EXISTS`, `ON CONFLICT DO NOTHING`), so editing it and recycling Postgres re-applies cleanly **only if PGDATA is empty** — for an existing DB you must apply migrations manually. The vector dimension is hard-wired to 2000.
+
+Promtail requires a **ClusterRole** (get/list/watch on pods/nodes/namespaces) for k8s service discovery; this is the only cluster-scoped resource owned by an app, so `make destroy-hr` deletes the ClusterRole + ClusterRoleBinding explicitly (`kubectl delete namespace` won't).
+
+**The HR namespace's monitoring stack also observes PageIndex MCP cross-namespace**: `prometheus-config` scrapes `pageindex-mcp.pageindex-mcp.svc:8201/metrics`, and `promtail-config` lists `pageindex-mcp` alongside `hr-chatbot` in its `kubernetes_sd_configs` namespaces. PageIndex has no monitoring of its own — Grafana/Prometheus/Loki/Promtail in `hr-chatbot` are the de-facto cluster-wide observability stack.
 
 ### PageIndex MCP — Services (`pageindex-mcp` namespace)
 | Service | Port | Notes |
 |---------|------|-------|
-| MCP server | 8201 | streamable-http transport, **stateful per session** |
-| Worker | — | `arq` queue worker (no port) |
+| MCP server | 8201 | streamable-http transport, **stateful per session**, also exposes `/metrics` |
+| Worker | — | `arq pageindex_mcp.worker.WorkerSettings` against Redis (no service) |
 
 Architectural notes that are easy to miss:
-- **Cross-namespace dependencies**: server + worker reach MinIO and Redis from the `neonatal-care` namespace via FQDN service names (`neonatal-care-minio.neonatal-care:9000`, `neonatal-care-redis.neonatal-care:6379/1`). Neonatal must be deployed first.
-- **Ingress is a Traefik `IngressRoute`** (not a standard `Ingress`), with **sticky sessions** (`mcp_affinity` cookie). MCP's streamable-http transport requires session affinity to a single pod. cert-manager's ingress-shim does not auto-issue certs for IngressRoutes, so `certificate.yaml` declares the `Certificate` resource explicitly.
+- **Cross-namespace dependencies**: server + worker reach MinIO and Redis from the `neonatal-care` namespace via FQDN service names (`neonatal-care-minio.neonatal-care:9000`, `neonatal-care-redis.neonatal-care:6379/1`). Neonatal must be deployed first. The MinIO bucket used by PageIndex is `pageindex` and shares `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` with neonatal — keep `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` in the PageIndex Secret matching the values used by the neonatal MinIO Deployment.
+- **Ingress is a Traefik `IngressRoute`** (not a standard `Ingress`), with **sticky sessions** (`mcp_affinity` cookie). MCP's streamable-http transport requires session affinity to a single pod. cert-manager's ingress-shim does not auto-issue certs for IngressRoutes, so `certificate.yaml` declares the `Certificate` resource explicitly. The deploy step also runs `kubectl delete ingress pageindex-mcp --ignore-not-found` to remove a stale standard-Ingress object that was previously deployed under the same name (legacy cleanup; do not re-create).
 - **Azure OpenAI prefix mismatch**: the server uses `AsyncAzureOpenAI` directly and wants the bare deployment name (e.g. `gpt-4.1`); the worker uses `litellm` via the pageindex library and needs the `azure/` prefix. The ConfigMap holds bare names; `worker-deployment.yaml` overrides `PAGEINDEX_*MODEL` env vars to add the prefix. Both `OPENAI_API_KEY` and `AZURE_API_KEY` must be set to the same value when `OPENAI_BASE_URL` points at Azure.
 
 ### TLS & Networking
@@ -100,7 +112,7 @@ Architectural notes that are easy to miss:
 - **Domains**: `neonate-logger.saliltrehan.com`, `airline-hr.saliltrehan.com`, `grafana-hr.saliltrehan.com`, `adminer-hr.saliltrehan.com`, `pageindex.aiwithsalil.work`.
 
 ### Storage
-Default storage class is k3s `local-path` (single-node HostPath). To use Hetzner block storage on multi-node clusters, uncomment `storageClassName: hcloud-volumes` in PVC files. **Stateful workloads with file locks** (Prometheus, Loki, Grafana) use `strategy: Recreate` because two pods cannot mount the same `local-path` PVC simultaneously.
+Default storage class is k3s `local-path` (single-node HostPath, `accessModes: ReadWriteOnce`). To use Hetzner block storage on multi-node clusters, switch the PVC `storageClassName` to `hcloud-volumes`. Every stateful workload that holds a file lock on its PVC — **ClickHouse, MinIO, n8n, Postgres (StatefulSet), Prometheus, Loki, Grafana** — uses `strategy: Recreate` (or is a StatefulSet) because two pods cannot mount the same `local-path` PVC simultaneously. This is a global pattern: when adding a new PVC-backed Deployment, set `strategy: Recreate` unless you've separately verified the workload tolerates two writers.
 
 ### Pod Cleanup
 Each app namespace ships its own `cronjob-pod-cleanup.yaml` (every 15 min, dedicated ServiceAccount + namespace-scoped Role) that deletes pods in `Failed` or `Succeeded` phase. The deploy workflow also runs cleanup post-deploy. Use `make clean-pods-<app>` for a manual sweep.
@@ -112,4 +124,6 @@ Source repos (`neonatal-care-repo`, `airline-hr-chatbot`, `pageindex-mcp`) build
 
 - **Never commit `secret.yaml`** (gitignored). Use the `.example` template + `make k8s-secrets-<app>`.
 - When adding manifests, also update the corresponding `deploy-<app>` Makefile target **and** the `Apply k8s manifests — <app>` step in `.github/workflows/deploy.yml`. The Makefile and workflow apply the same files in the same order — keep them in sync.
-- Cluster-scoped resources (ClusterRole, ClusterRoleBinding, ClusterIssuer, Certificate when paired with non-Ingress routes) are not deleted by `kubectl delete namespace`. The `destroy-<app>` target must clean these up explicitly (see `destroy-hr` for the pattern).
+- Cluster-scoped resources (ClusterRole, ClusterRoleBinding, ClusterIssuer) are not deleted by `kubectl delete namespace`. The `destroy-<app>` target must clean these up explicitly (see `destroy-hr` for the pattern).
+- Cross-namespace coupling is intentional and load-bearing: PageIndex consumes neonatal-care's MinIO + Redis, and HR's Prometheus/Promtail scrapes the PageIndex namespace. When destroying or relocating a namespace, check the other apps' ConfigMaps for FQDN references first.
+- All app images live under `ghcr.io/trehansalil/<app>`. Neonatal is public; HR and PageIndex are private and require the `ghcr-credentials` pull secret in their namespace (the Deployments declare `imagePullSecrets: [{name: ghcr-credentials}]`). Adding a new private-image app means provisioning that secret as part of bootstrap.
