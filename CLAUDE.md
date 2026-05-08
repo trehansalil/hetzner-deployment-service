@@ -14,8 +14,10 @@ make cluster-init        # Apply namespaces, install ingress-nginx + cert-manage
 ```
 Note: `cluster-init` installs `ingress-nginx`, but live ingresses target the k3s built-in **Traefik** controller (`ingressClassName: traefik`). The nginx install is legacy/unused — the active controller for all apps is Traefik.
 
-### Per-app targets (uniform Makefile pattern)
-Every app has the same target shape: `deploy-<app>`, `rollout-<app>` (with `IMAGE_TAG=<sha>` or app-specific `HR_IMAGE_TAG` / `PAGEINDEX_IMAGE_TAG`), `status-<app>`, `logs-<app>`, `rollback-<app>`, `destroy-<app>`, `ghcr-secret-<app> GITHUB_PAT=<pat>`, `k8s-secrets-<app>`. Substitute `<app>` with `neonatal`, `hr`, or `pageindex`.
+### Per-app targets (Makefile pattern)
+Every app exposes the core lifecycle targets `deploy-<app>`, `rollout-<app>` (with `IMAGE_TAG=<sha>` or app-specific `HR_IMAGE_TAG` / `PAGEINDEX_IMAGE_TAG`), `status-<app>`, `logs-<app>`, `rollback-<app>`, `destroy-<app>`, and `k8s-secrets-<app>`. Substitute `<app>` with `neonatal`, `hr`, or `pageindex`.
+
+`ghcr-secret-<app> GITHUB_PAT=<pat>` exists only for `hr` and `pageindex` (private GHCR images); the neonatal image is public and needs no pull secret.
 
 App-specific extras:
 - **Neonatal**: `make init-clickhouse` (one-time DB schema), `make clean-pods-neonatal`, `make status-neonatal-resources` (ResourceQuota + LimitRange).
@@ -123,7 +125,8 @@ Source repos (`neonatal-care-repo`, `airline-hr-chatbot`, `pageindex-mcp`) build
 ## Conventions
 
 - **Never commit `secret.yaml`** (gitignored). Use the `.example` template + `make k8s-secrets-<app>`.
-- When adding manifests, also update the corresponding `deploy-<app>` Makefile target **and** the `Apply k8s manifests — <app>` step in `.github/workflows/deploy.yml`. The Makefile and workflow apply the same files in the same order — keep them in sync.
-- Cluster-scoped resources (ClusterRole, ClusterRoleBinding, ClusterIssuer) are not deleted by `kubectl delete namespace`. The `destroy-<app>` target must clean these up explicitly (see `destroy-hr` for the pattern).
+- When adding manifests, also update the corresponding `deploy-<app>` Makefile target **and** the `Apply k8s manifests — <app>` step in `.github/workflows/deploy.yml`. Keep the **non-secret** manifest list in sync between the two; `secret.yaml` is gitignored and is the intentional exception (the workflow never applies it).
+- Secret application is not uniform across `deploy-<app>` targets: `deploy-neonatal` and `deploy-hr` apply `apps/<app>/secret.yaml` inline, but `deploy-pageindex` does **not** — operators must run `make k8s-secrets-pageindex` separately. Use `make k8s-secrets-<app>` for any app when you want a deterministic secret-only apply.
+- App-owned cluster-scoped resources are not deleted by `kubectl delete namespace`, so `destroy-<app>` must clean them up explicitly. Currently the only such resources are the `promtail-hr-chatbot` ClusterRole + ClusterRoleBinding (see `destroy-hr`). The Let's Encrypt `ClusterIssuer`s are owned by `cluster-init`, not by any app, and are not touched by `destroy-<app>`.
 - Cross-namespace coupling is intentional and load-bearing: PageIndex consumes neonatal-care's MinIO + Redis, and HR's Prometheus/Promtail scrapes the PageIndex namespace. When destroying or relocating a namespace, check the other apps' ConfigMaps for FQDN references first.
 - All app images live under `ghcr.io/trehansalil/<app>`. Neonatal is public; HR and PageIndex are private and require the `ghcr-credentials` pull secret in their namespace (the Deployments declare `imagePullSecrets: [{name: ghcr-credentials}]`). Adding a new private-image app means provisioning that secret as part of bootstrap.

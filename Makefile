@@ -69,6 +69,16 @@ clean-pods-neonatal:
 	@echo "Current pods:"
 	$(KUBECTL) get pods -n $(NEONATAL_NS)
 
+.PHONY: k8s-secrets-neonatal
+k8s-secrets-neonatal:
+	@if [ ! -f apps/neonatal-care/secret.yaml ]; then \
+		echo "ERROR: apps/neonatal-care/secret.yaml not found."; \
+		echo "Copy secret.yaml.example, fill in base64 values, then re-run."; \
+		exit 1; \
+	fi
+	$(KUBECTL) apply -f apps/neonatal-care/namespace.yaml
+	$(KUBECTL) apply -f apps/neonatal-care/secret.yaml -n $(NEONATAL_NS)
+
 .PHONY: status-neonatal-resources
 status-neonatal-resources:
 	@echo "=== ResourceQuota ==="
