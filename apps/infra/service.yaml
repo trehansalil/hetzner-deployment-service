@@ -79,6 +79,11 @@ metadata:
 spec:
   type: ClusterIP
   clusterIP: None
+  # Keep publishing the pod's DNS A record even while it is NotReady (e.g. mid-restart),
+  # so postgres.infra.svc.cluster.local does not NXDOMAIN during the unready window — a
+  # headless Service otherwise only resolves ready endpoints. Cross-namespace clients then
+  # get connection-refused and retry (DNS still resolves) instead of a hard DNS failure.
+  publishNotReadyAddresses: true
   selector:
     app: postgres
   ports:
