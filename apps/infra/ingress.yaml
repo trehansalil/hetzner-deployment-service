@@ -16,7 +16,7 @@
 #
 # Route map (host = infra.saliltrehan.com):
 #   /grafana        -> grafana:3000   NO strip   (Grafana serves under the subpath itself)
-#   /adminer        -> adminer:8080   StripPrefix + trailing-slash redirect
+#   /adminer        -> adminer:8080   ipAllowList + StripPrefix + trailing-slash redirect
 #   /minio-console  -> minio:9001     StripPrefix + trailing-slash redirect
 #   /minio          -> minio:9000     StripPrefix (S3 API; like-for-like with the old nginx)
 #   /automation     -> n8n:5678       NO strip   (n8n serves under N8N_PATH=/automation/)
@@ -86,6 +86,22 @@ spec:
     replacement: "${1}/adminer/"
     permanent: true
 ---
+# Restrict the Adminer DB-admin UI to trusted source IPs. Adminer keeps no app-level
+# session (it is a stateless DB client), so without this its public login form is an
+# exposed attack surface (CVEs, brute-force). `ipAllowList` is Traefik v3 syntax; on
+# Traefik v2 the equivalent field is `ipWhiteList`. As shipped, sourceRange is an
+# RFC-5737 TEST-NET placeholder that matches no real client (fail-closed) — REPLACE it
+# with your admin CIDR(s) before deploying, or Adminer will be unreachable.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: adminer-ipallow
+  namespace: infra
+spec:
+  ipAllowList:
+    sourceRange:
+      - 203.0.113.0/24   # REPLACE: your admin source IP/CIDR (e.g. 198.51.100.7/32)
+---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
 metadata:
@@ -147,10 +163,12 @@ spec:
       services:
         - name: grafana
           port: 3000
-    # Adminer — strip + trailing-slash redirect (redirect runs first).
+    # Adminer — IP allow-list first (DB-admin UI, no app auth), then trailing-slash
+    # redirect + strip.
     - match: Host(`infra.saliltrehan.com`) && (Path(`/adminer`) || PathPrefix(`/adminer/`))
       kind: Rule
       middlewares:
+        - name: adminer-ipallow
         - name: redirect-adminer-slash
         - name: strip-adminer
       services:

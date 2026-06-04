@@ -23,9 +23,11 @@ spec:
       restartPolicy: OnFailure
       containers:
       - name: init-clickhouse
-        # Pinned (was :latest); keep in lockstep with the clickhouse-server tag in
-        # apps/infra/deployment.yaml.
-        image: clickhouse/clickhouse-client:25.8
+        # Use the server image — it bundles the clickhouse-client binary. The standalone
+        # clickhouse/clickhouse-client image was abandoned at 21.x (no 25.8 tag), so it
+        # would ImagePullBackOff. This stays in lockstep with deployment.yaml and reuses
+        # the image already pulled on the node.
+        image: clickhouse/clickhouse-server:25.8
         command:
           - sh
           - -c

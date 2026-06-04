@@ -265,6 +265,12 @@ destroy-hr:
 	@echo "WARNING: This will delete all hr-chatbot resources!"
 	@echo "         Shared infra (Postgres, monitoring) is NOT touched — it lives in the infra namespace."
 	$(KUBECTL) delete namespace $(HR_NS)
+	# Legacy cluster-scoped RBAC from the pre-infra topology (promtail used to run in
+	# hr-chatbot). It survives `kubectl delete namespace`, so prune it explicitly. No-op
+	# on clusters provisioned from the current manifests (promtail now lives in infra as
+	# promtail-infra).
+	$(KUBECTL) delete clusterrole promtail-hr-chatbot --ignore-not-found
+	$(KUBECTL) delete clusterrolebinding promtail-hr-chatbot --ignore-not-found
 
 # ─── PageIndex MCP Server ────────────────────────────────────────────────────
 
