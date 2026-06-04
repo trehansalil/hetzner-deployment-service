@@ -25,3 +25,13 @@ data:
   # OPENAI_BASE_URL is an Azure resource) lives in pageindex-mcp-secrets.
   AZURE_API_BASE: "https://techlotus-openai-api.openai.azure.com"
   AZURE_API_VERSION: "2024-08-01-preview"
+  # Native math-library thread caps. Without these, torch/onnxruntime/BLAS spawn
+  # one thread per host vCPU (~4 on this node), which both saturates ~2 cores (the
+  # observed "2x CPU" spike) and inflates per-thread scratch arenas that push the
+  # worker past its memory limit. DOCLING_NUM_THREADS only bounds Docling's own
+  # AcceleratorOptions pool; the OS-level caps below bound the native backends.
+  DOCLING_NUM_THREADS: "1"
+  OMP_NUM_THREADS: "1"
+  MKL_NUM_THREADS: "1"
+  OPENBLAS_NUM_THREADS: "1"
+  NUMEXPR_NUM_THREADS: "1"
