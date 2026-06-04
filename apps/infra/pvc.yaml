@@ -1,0 +1,121 @@
+# Persistent Volume Claims for all shared infrastructure.
+# Every PVC pins storageClassName: local-path explicitly (k3s single-node HostPath,
+# ReadWriteOnce) so a change to the cluster's *default* StorageClass can't silently
+# move some volumes onto a different backend. For multi-node clusters switch every
+# PVC's storageClassName to 'hcloud-volumes' (Hetzner CSI) for network-attached storage.
+#
+# local-path PVs are namespace-bound: data does NOT follow a PVC across namespaces.
+# Migrating existing data from the old app-namespace PVCs into these is a one-time
+# operation — see apps/infra/MIGRATION.md.
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: clickhouse-data
+  namespace: infra
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: clickhouse-logs
+  namespace: infra
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: minio-data
+  namespace: infra
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: n8n-data
+  namespace: infra
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-data
+  namespace: infra
+  labels:
+    app: postgres
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: prometheus-data
+  namespace: infra
+  labels:
+    app: prometheus
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 20Gi  # 7-day retention at ~1 MB/min ≈ 10-20 GB
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: loki-data
+  namespace: infra
+  labels:
+    app: loki
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 10Gi  # 72h log retention
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: grafana-data
+  namespace: infra
+  labels:
+    app: grafana
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 5Gi  # Grafana state: plugin cache, SQLite DB, alert state

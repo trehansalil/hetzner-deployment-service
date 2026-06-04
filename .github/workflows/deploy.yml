@@ -19,6 +19,7 @@ on:
         default: 'neonatal-care'
         type: choice
         options:
+          - infra
           - neonatal-care
           - airline-hr-chatbot
           - pageindex-mcp
@@ -53,6 +54,37 @@ jobs:
           echo "app=$APP" >> $GITHUB_OUTPUT
           echo "image_tag=$TAG" >> $GITHUB_OUTPUT
 
+      # Shared infrastructure — manual deploys only (3rd-party images, no rollout).
+      # Secrets are gitignored and must be created out-of-band (make k8s-secrets-infra).
+      - name: Apply k8s manifests — infra
+        if: steps.vars.outputs.app == 'infra' && github.event_name == 'workflow_dispatch'
+        run: |
+          kubectl apply -f apps/infra/namespace.yaml
+          kubectl apply -f apps/infra/configmap.yaml -n infra
+          kubectl apply -f apps/infra/pvc.yaml -n infra
+          kubectl apply -f apps/infra/rbac.yaml
+          # Services before the StatefulSet — its governing headless Service must exist first.
+          kubectl apply -f apps/infra/service.yaml -n infra
+          kubectl apply -f apps/infra/statefulset.yaml -n infra
+          kubectl apply -f apps/infra/deployment.yaml -n infra
+          kubectl apply -f apps/infra/daemonset.yaml -n infra
+          kubectl apply -f apps/infra/certificate.yaml -n infra
+          kubectl apply -f apps/infra/ingress.yaml -n infra
+          # Inject the Adminer IP allow-list from $ADMIN_CIDR (define the repo/Actions
+          # variable ADMIN_CIDR to override) so the real admin IP is never committed to
+          # this public repo. Unset -> the committed fail-closed placeholder. JSON merge
+          # patch replaces sourceRange wholesale.
+          kubectl patch middleware adminer-ipallow -n infra --type merge \
+            -p "{\"spec\":{\"ipAllowList\":{\"sourceRange\":[\"${ADMIN_CIDR:-203.0.113.0/24}\"]}}}"
+          # The legacy per-host Ingresses superseded by this consolidated host live in
+          # the hr-chatbot namespace (hr-chatbot-grafana / hr-chatbot-adminer) and must
+          # keep serving through the migration validation window — they are pruned at
+          # decommission, not here. See apps/infra/MIGRATION.md Phase 5.
+          kubectl apply -f apps/infra/cronjob-pod-cleanup.yaml -n infra
+        env:
+          # Optional GitHub Actions variable; empty -> fail-closed placeholder above.
+          ADMIN_CIDR: ${{ vars.ADMIN_CIDR }}
+
       - name: Apply k8s manifests — neonatal-care
         if: steps.vars.outputs.app == 'neonatal-care'
         run: |
@@ -60,7 +92,6 @@ jobs:
           kubectl apply -f apps/neonatal-care/limitrange.yaml -n neonatal-care
           kubectl apply -f apps/neonatal-care/resourcequota.yaml -n neonatal-care
           kubectl apply -f apps/neonatal-care/configmap.yaml -n neonatal-care
-          kubectl apply -f apps/neonatal-care/pvc.yaml -n neonatal-care
           kubectl apply -f apps/neonatal-care/deployment.yaml -n neonatal-care
           kubectl apply -f apps/neonatal-care/service.yaml -n neonatal-care
           kubectl apply -f apps/neonatal-care/ingress.yaml -n neonatal-care
@@ -70,11 +101,7 @@ jobs:
         if: steps.vars.outputs.app == 'airline-hr-chatbot'
         run: |
           kubectl apply -f apps/airline-hr-chatbot/namespace.yaml
-          kubectl apply -f apps/airline-hr-chatbot/rbac.yaml
-          kubectl apply -f apps/airline-hr-chatbot/configmap.yaml -n hr-chatbot
-          kubectl apply -f apps/airline-hr-chatbot/pvc.yaml -n hr-chatbot
           kubectl apply -f apps/airline-hr-chatbot/deployment.yaml -n hr-chatbot
-          kubectl apply -f apps/airline-hr-chatbot/daemonset.yaml -n hr-chatbot
           kubectl apply -f apps/airline-hr-chatbot/service.yaml -n hr-chatbot
           kubectl apply -f apps/airline-hr-chatbot/ingress.yaml -n hr-chatbot
           kubectl apply -f apps/airline-hr-chatbot/cronjob-pod-cleanup.yaml -n hr-chatbot

@@ -1,0 +1,21 @@
+# Explicit Certificate for the consolidated infra host, used by the Traefik
+# IngressRoute in ingress.yaml. cert-manager's ingress-shim only auto-issues
+# Certificates for standard Ingress objects, NOT for Traefik IngressRoute CRDs,
+# so the cert must be declared explicitly (same pattern as
+# apps/pageindex-mcp/certificate.yaml). The secret MUST live in the same
+# namespace as the IngressRoute — Traefik cannot read TLS secrets cross-namespace.
+#
+# Prerequisite: a DNS A record for infra.saliltrehan.com -> the Hetzner server IP
+# must exist before issuance, or the Let's Encrypt HTTP-01 challenge fails.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: infra-tls
+  namespace: infra
+spec:
+  secretName: infra-tls
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+  dnsNames:
+    - infra.saliltrehan.com

@@ -1,6 +1,17 @@
 apiVersion: v1
 kind: Namespace
 metadata:
+  name: infra
+  labels:
+    # Keep this label set identical to apps/infra/namespace.yaml — both manifests
+    # apply the `infra` Namespace (cluster-init and deploy-infra), so a divergent
+    # label set here would flap the labels on every re-apply.
+    app.kubernetes.io/part-of: infra
+    app.kubernetes.io/managed-by: kubectl
+---
+apiVersion: v1
+kind: Namespace
+metadata:
   name: neonatal-care
   labels:
     app.kubernetes.io/managed-by: kubectl

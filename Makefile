@@ -1,4 +1,5 @@
 KUBECTL := kubectl
+INFRA_NS := infra
 NEONATAL_NS := neonatal-care
 IMAGE_TAG ?= latest
 IMAGE := ghcr.io/trehansalil/neonatal-care
@@ -21,6 +22,96 @@ cluster-init:
 	$(KUBECTL) apply -f cluster/traefik-config.yaml
 	@echo "Cluster bootstrap complete."
 
+# ─── Shared Infrastructure (datastores + observability) ───────────────────────
+# Deploy this FIRST — every app depends on it; it depends on nothing.
+# Secrets are gitignored: run `make k8s-secrets-infra` before `make deploy-infra`,
+# or place apps/infra/secret.yaml so the inline apply below succeeds.
+
+# Adminer IP allow-list source range. Injected into the `adminer-ipallow` Middleware at
+# deploy time (kubectl patch) so the real admin IP is NEVER committed to this public repo.
+# Override per-invocation:  make deploy-infra ADMIN_CIDR=198.51.100.7/32
+# Left unset it stays the fail-closed RFC-5737 placeholder (Adminer unreachable until set).
+ADMIN_CIDR ?= 203.0.113.0/24
+
+.PHONY: deploy-infra
+deploy-infra:
+	$(KUBECTL) apply -f apps/infra/namespace.yaml
+	$(KUBECTL) apply -f apps/infra/configmap.yaml -n $(INFRA_NS)
+	$(KUBECTL) apply -f apps/infra/secret.yaml -n $(INFRA_NS)
+	$(KUBECTL) apply -f apps/infra/pvc.yaml -n $(INFRA_NS)
+	$(KUBECTL) apply -f apps/infra/rbac.yaml
+	# Services before the StatefulSet — the postgres StatefulSet's governing headless
+	# Service (serviceName: postgres) must exist first for stable pod DNS on bring-up.
+	$(KUBECTL) apply -f apps/infra/service.yaml -n $(INFRA_NS)
+	$(KUBECTL) apply -f apps/infra/statefulset.yaml -n $(INFRA_NS)
+	$(KUBECTL) apply -f apps/infra/deployment.yaml -n $(INFRA_NS)
+	$(KUBECTL) apply -f apps/infra/daemonset.yaml -n $(INFRA_NS)
+	$(KUBECTL) apply -f apps/infra/certificate.yaml -n $(INFRA_NS)
+	$(KUBECTL) apply -f apps/infra/ingress.yaml -n $(INFRA_NS)
+	# Inject the Adminer IP allow-list from $(ADMIN_CIDR) — keeps the real admin IP out of
+	# this public repo. JSON merge patch replaces sourceRange wholesale; unset keeps the
+	# committed fail-closed placeholder. See apps/infra/ingress.yaml for the env-var note.
+	$(KUBECTL) patch middleware adminer-ipallow -n $(INFRA_NS) --type merge \
+		-p '{"spec":{"ipAllowList":{"sourceRange":["$(ADMIN_CIDR)"]}}}'
+	# The legacy per-host Ingresses superseded by this consolidated host live in the
+	# hr-chatbot namespace (hr-chatbot-grafana / hr-chatbot-adminer) and must keep serving
+	# through the migration validation window — they are pruned at decommission, not here.
+	# See apps/infra/MIGRATION.md Phase 5.
+	$(KUBECTL) apply -f apps/infra/cronjob-pod-cleanup.yaml -n $(INFRA_NS)
+
+.PHONY: status-infra
+status-infra:
+	$(KUBECTL) get pods,svc,ingress,ingressroute,middleware,certificate,pvc -n $(INFRA_NS)
+
+.PHONY: clean-pods-infra
+clean-pods-infra:
+	@echo "Deleting Failed/Evicted pods in $(INFRA_NS)..."
+	$(KUBECTL) delete pods -n $(INFRA_NS) --field-selector=status.phase==Failed --ignore-not-found
+	@echo "Deleting Succeeded pods in $(INFRA_NS)..."
+	$(KUBECTL) delete pods -n $(INFRA_NS) --field-selector=status.phase==Succeeded --ignore-not-found
+	@echo "Current pods:"
+	$(KUBECTL) get pods -n $(INFRA_NS)
+
+.PHONY: k8s-secrets-infra
+k8s-secrets-infra:
+	@if [ ! -f apps/infra/secret.yaml ]; then \
+		echo "ERROR: apps/infra/secret.yaml not found."; \
+		echo "Copy secret.yaml.example, fill in base64 values, then re-run."; \
+		exit 1; \
+	fi
+	$(KUBECTL) apply -f apps/infra/namespace.yaml
+	$(KUBECTL) apply -f apps/infra/secret.yaml -n $(INFRA_NS)
+
+# Initialize the ClickHouse schema (one-time). Requires the `infra-sql-init`
+# ConfigMap to exist first:
+#   kubectl create configmap infra-sql-init \
+#     --from-file=init_clickhouse.sql=<path-to-file> -n infra
+.PHONY: init-clickhouse
+init-clickhouse:
+	$(KUBECTL) apply -f apps/infra/jobs/init-clickhouse-job.yaml -n $(INFRA_NS)
+	$(KUBECTL) wait --for=condition=complete job/init-clickhouse --timeout=120s -n $(INFRA_NS)
+
+.PHONY: port-grafana-infra
+port-grafana-infra:
+	$(KUBECTL) port-forward -n $(INFRA_NS) svc/grafana 3000:3000
+
+.PHONY: port-prometheus-infra
+port-prometheus-infra:
+	$(KUBECTL) port-forward -n $(INFRA_NS) svc/prometheus 9090:9090
+
+.PHONY: port-adminer-infra
+port-adminer-infra:
+	$(KUBECTL) port-forward -n $(INFRA_NS) svc/adminer 8080:8080
+
+.PHONY: destroy-infra
+destroy-infra:
+	@echo "WARNING: This deletes ALL shared infrastructure (datastores + observability)"
+	@echo "         including persistent volumes. Every app depends on it — destroy the"
+	@echo "         app namespaces FIRST. This should almost never be run."
+	$(KUBECTL) delete namespace $(INFRA_NS)
+	$(KUBECTL) delete clusterrole promtail-infra --ignore-not-found
+	$(KUBECTL) delete clusterrolebinding promtail-infra --ignore-not-found
+
 # ─── Neonatal Care App ────────────────────────────────────────────────────────
 
 .PHONY: deploy-neonatal
@@ -30,7 +121,6 @@ deploy-neonatal:
 	$(KUBECTL) apply -f apps/neonatal-care/resourcequota.yaml -n $(NEONATAL_NS)
 	$(KUBECTL) apply -f apps/neonatal-care/configmap.yaml -n $(NEONATAL_NS)
 	$(KUBECTL) apply -f apps/neonatal-care/secret.yaml -n $(NEONATAL_NS)
-	$(KUBECTL) apply -f apps/neonatal-care/pvc.yaml -n $(NEONATAL_NS)
 	$(KUBECTL) apply -f apps/neonatal-care/deployment.yaml -n $(NEONATAL_NS)
 	$(KUBECTL) apply -f apps/neonatal-care/service.yaml -n $(NEONATAL_NS)
 	$(KUBECTL) apply -f apps/neonatal-care/ingress.yaml -n $(NEONATAL_NS)
@@ -88,11 +178,6 @@ status-neonatal-resources:
 	@echo "=== Pods ==="
 	$(KUBECTL) get pods -n $(NEONATAL_NS) -o wide
 
-.PHONY: init-clickhouse
-init-clickhouse:
-	$(KUBECTL) apply -f apps/neonatal-care/jobs/init-clickhouse-job.yaml -n $(NEONATAL_NS)
-	$(KUBECTL) wait --for=condition=complete job/init-clickhouse --timeout=120s -n $(NEONATAL_NS)
-
 .PHONY: destroy-neonatal
 destroy-neonatal:
 	@echo "WARNING: This will delete all neonatal-care resources including persistent volumes!"
@@ -107,12 +192,8 @@ HR_IMAGE_TAG ?= latest
 .PHONY: deploy-hr
 deploy-hr:
 	$(KUBECTL) apply -f apps/airline-hr-chatbot/namespace.yaml
-	$(KUBECTL) apply -f apps/airline-hr-chatbot/rbac.yaml
-	$(KUBECTL) apply -f apps/airline-hr-chatbot/configmap.yaml -n $(HR_NS)
 	$(KUBECTL) apply -f apps/airline-hr-chatbot/secret.yaml -n $(HR_NS)
-	$(KUBECTL) apply -f apps/airline-hr-chatbot/pvc.yaml -n $(HR_NS)
 	$(KUBECTL) apply -f apps/airline-hr-chatbot/deployment.yaml -n $(HR_NS)
-	$(KUBECTL) apply -f apps/airline-hr-chatbot/daemonset.yaml -n $(HR_NS)
 	$(KUBECTL) apply -f apps/airline-hr-chatbot/service.yaml -n $(HR_NS)
 	$(KUBECTL) apply -f apps/airline-hr-chatbot/ingress.yaml -n $(HR_NS)
 	$(KUBECTL) apply -f apps/airline-hr-chatbot/cronjob-pod-cleanup.yaml -n $(HR_NS)
@@ -189,22 +270,18 @@ shell-hr:
 port-app-hr:
 	$(KUBECTL) port-forward -n $(HR_NS) svc/app 9040:9040
 
-.PHONY: port-grafana-hr
-port-grafana-hr:
-	$(KUBECTL) port-forward -n $(HR_NS) svc/grafana 3000:3000
-
-.PHONY: port-prometheus-hr
-port-prometheus-hr:
-	$(KUBECTL) port-forward -n $(HR_NS) svc/prometheus 9090:9090
-
-.PHONY: port-adminer-hr
-port-adminer-hr:
-	$(KUBECTL) port-forward -n $(HR_NS) svc/adminer 8080:8080
+# Grafana / Prometheus / Adminer now live in the infra namespace:
+#   make port-grafana-infra | port-prometheus-infra | port-adminer-infra
 
 .PHONY: destroy-hr
 destroy-hr:
-	@echo "WARNING: This will delete all hr-chatbot resources including persistent volumes!"
+	@echo "WARNING: This will delete all hr-chatbot resources!"
+	@echo "         Shared infra (Postgres, monitoring) is NOT touched — it lives in the infra namespace."
 	$(KUBECTL) delete namespace $(HR_NS)
+	# Legacy cluster-scoped RBAC from the pre-infra topology (promtail used to run in
+	# hr-chatbot). It survives `kubectl delete namespace`, so prune it explicitly. No-op
+	# on clusters provisioned from the current manifests (promtail now lives in infra as
+	# promtail-infra).
 	$(KUBECTL) delete clusterrole promtail-hr-chatbot --ignore-not-found
 	$(KUBECTL) delete clusterrolebinding promtail-hr-chatbot --ignore-not-found
 
