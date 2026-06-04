@@ -20,7 +20,10 @@ spec:
     spec:
       containers:
       - name: clickhouse
-        image: clickhouse/clickhouse-server:latest
+        # Pinned (was :latest). On a host-path data migration this tag must be >= the
+        # version currently running live, or ClickHouse refuses to start on the copied
+        # data dir (no cross-version downgrade). See apps/infra/MIGRATION.md.
+        image: clickhouse/clickhouse-server:25.8
         ports:
         - containerPort: 8123
         - containerPort: 9000
@@ -96,7 +99,8 @@ spec:
     spec:
       containers:
       - name: minio
-        image: minio/minio:latest
+        # Pinned (was :latest); verify >= the live version before a data migration.
+        image: minio/minio:RELEASE.2025-09-07T16-13-09Z
         args: ["server", "/data", "--console-address", ":9001"]
         ports:
         - containerPort: 9000
@@ -201,7 +205,9 @@ spec:
     spec:
       containers:
       - name: n8n
-        image: n8nio/n8n:latest
+        # Pinned (was :latest). n8n migrates its SQLite schema on startup and does not
+        # support downgrade, so keep this >= the live version. See apps/infra/MIGRATION.md.
+        image: n8nio/n8n:1.123.52
         ports:
         - containerPort: 5678
         env:

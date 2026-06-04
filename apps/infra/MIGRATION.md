@@ -100,6 +100,12 @@ kill $OLD $NEW
 
 > Warn users — the neonatal-care app loses its DB / n8n during these windows.
 
+> **Version check first.** The new ClickHouse/n8n images are pinned in
+> `apps/infra/deployment.yaml` (ClickHouse `25.8`, n8n `1.123.52`). The copied data dir is
+> only readable by an **equal-or-newer** engine — neither supports a downgrade — so before
+> scaling the new pod up, confirm the pinned tag is ≥ the version running live (the old
+> deployments used `:latest`). If the live version is newer, bump the pin to match first.
+
 **ClickHouse** (owner UID/GID 999):
 
 ```bash
@@ -192,6 +198,11 @@ kubectl delete statefulset postgres -n hr-chatbot
 kubectl delete deployment adminer prometheus loki grafana -n hr-chatbot
 kubectl delete daemonset promtail -n hr-chatbot
 kubectl delete service postgres adminer prometheus loki grafana -n hr-chatbot
+# Legacy per-host Ingresses + their cert-manager TLS secrets, superseded by the
+# consolidated infra.saliltrehan.com IngressRoute. `kubectl apply` never prunes renamed
+# objects, so these must be deleted explicitly or they keep serving stale routes/certs.
+kubectl delete ingress hr-chatbot-grafana hr-chatbot-adminer -n hr-chatbot --ignore-not-found
+kubectl delete secret  hr-chatbot-grafana-tls hr-chatbot-adminer-tls -n hr-chatbot --ignore-not-found
 kubectl delete pvc postgres-data prometheus-data loki-data grafana-data -n hr-chatbot
 kubectl delete clusterrole promtail-hr-chatbot; kubectl delete clusterrolebinding promtail-hr-chatbot
 kubectl delete configmap postgres-init-sql prometheus-config loki-config promtail-config \

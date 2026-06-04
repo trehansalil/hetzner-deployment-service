@@ -40,14 +40,15 @@ deploy-infra:
 	$(KUBECTL) apply -f apps/infra/service.yaml -n $(INFRA_NS)
 	$(KUBECTL) apply -f apps/infra/certificate.yaml -n $(INFRA_NS)
 	$(KUBECTL) apply -f apps/infra/ingress.yaml -n $(INFRA_NS)
-	# Remove the legacy per-host Ingresses replaced by the consolidated
-	# infra.saliltrehan.com IngressRoute (kubectl apply does not prune renamed objects).
-	$(KUBECTL) delete ingress infra-grafana infra-adminer -n $(INFRA_NS) --ignore-not-found
+	# The legacy per-host Ingresses superseded by this consolidated host live in the
+	# hr-chatbot namespace (hr-chatbot-grafana / hr-chatbot-adminer) and must keep serving
+	# through the migration validation window — they are pruned at decommission, not here.
+	# See apps/infra/MIGRATION.md Phase 5.
 	$(KUBECTL) apply -f apps/infra/cronjob-pod-cleanup.yaml -n $(INFRA_NS)
 
 .PHONY: status-infra
 status-infra:
-	$(KUBECTL) get pods,svc,ingress,pvc -n $(INFRA_NS)
+	$(KUBECTL) get pods,svc,ingress,ingressroute,middleware,certificate,pvc -n $(INFRA_NS)
 
 .PHONY: clean-pods-infra
 clean-pods-infra:

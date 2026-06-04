@@ -126,10 +126,13 @@ with trailing slash — strip+serve_from_sub_path is the infinite-301 loop, Graf
 trailing-slash proxy), `/automation` → n8n:5678 (NO strip; `N8N_PATH=/automation/`), and `/`
 → 302 → `/grafana/`. Route priority is left to Traefik's default length-sorting so
 `/minio-console` outranks `/minio`; no explicit `priority:` is set. This replaced the former
-per-host Ingresses (`grafana-hr` / `adminer-hr`, TLS `infra-grafana-tls` / `infra-adminer-tls`)
-**and** the infra paths previously proxied through the neonatal-care nginx
-(`neonate-logger.saliltrehan.com/{minio,minio-console,automation}`). `deploy-infra` deletes the
-two legacy Ingresses (`kubectl apply` does not prune renamed objects).
+per-host Ingresses (`hr-chatbot-grafana` / `hr-chatbot-adminer` in the `hr-chatbot`
+namespace — hosts `grafana-hr` / `adminer-hr`, TLS secrets `hr-chatbot-grafana-tls` /
+`hr-chatbot-adminer-tls`) **and** the infra paths previously proxied through the
+neonatal-care nginx (`neonate-logger.saliltrehan.com/{minio,minio-console,automation}`).
+Those legacy Ingresses + their TLS secrets are pruned at **decommission**
+(`apps/infra/MIGRATION.md` Phase 5), **not** by `deploy-infra`: they must keep serving
+through the migration validation window, and `kubectl apply` never prunes renamed objects.
 
 **Postgres** bootstraps from the `postgres-init-sql` ConfigMap (~1500-line idempotent SQL
 in `apps/infra/configmap.yaml`): `vector` + `pg_trgm` extensions; RAG tables
