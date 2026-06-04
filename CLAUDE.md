@@ -120,7 +120,7 @@ UIs/endpoints live under one host with path-based routing, via a Traefik **Ingre
 secret `infra-tls`, same namespace — Traefik can't read TLS secrets cross-namespace). Routes:
 `/grafana` → grafana:3000 (NO strip; `GF_SERVER_SERVE_FROM_SUB_PATH=true` + `GF_SERVER_ROOT_URL`
 with trailing slash — strip+serve_from_sub_path is the infinite-301 loop, Grafana #72577),
-`/adminer` → adminer:8080 (ipAllowList + StripPrefix + trailing-slash redirect — relative-URL DB-admin UI with no app-level auth, so an `adminer-ipallow` middleware restricts it to trusted source CIDRs; ships fail-closed with an RFC-5737 placeholder the operator must replace),
+`/adminer` → adminer:8080 (ipAllowList + StripPrefix + trailing-slash redirect — relative-URL DB-admin UI with no app-level auth, so an `adminer-ipallow` middleware restricts it to trusted source CIDRs; the committed value is a fail-closed RFC-5737 placeholder and the real admin CIDR is injected at deploy time from `$ADMIN_CIDR` (`make deploy-infra ADMIN_CIDR=…`, or the `ADMIN_CIDR` Actions variable) via `kubectl patch`, so the real IP never lands in this public repo),
 `/minio-console` → minio:9001 (StripPrefix + trailing-slash redirect; base path from
 `MINIO_BROWSER_REDIRECT_URL`), `/minio` → minio:9000 (StripPrefix; S3 API, ≡ the old nginx
 trailing-slash proxy), `/automation` → n8n:5678 (NO strip; `N8N_PATH=/automation/`), and `/`

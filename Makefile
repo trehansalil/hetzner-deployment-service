@@ -27,6 +27,12 @@ cluster-init:
 # Secrets are gitignored: run `make k8s-secrets-infra` before `make deploy-infra`,
 # or place apps/infra/secret.yaml so the inline apply below succeeds.
 
+# Adminer IP allow-list source range. Injected into the `adminer-ipallow` Middleware at
+# deploy time (kubectl patch) so the real admin IP is NEVER committed to this public repo.
+# Override per-invocation:  make deploy-infra ADMIN_CIDR=198.51.100.7/32
+# Left unset it stays the fail-closed RFC-5737 placeholder (Adminer unreachable until set).
+ADMIN_CIDR ?= 203.0.113.0/24
+
 .PHONY: deploy-infra
 deploy-infra:
 	$(KUBECTL) apply -f apps/infra/namespace.yaml
@@ -34,12 +40,19 @@ deploy-infra:
 	$(KUBECTL) apply -f apps/infra/secret.yaml -n $(INFRA_NS)
 	$(KUBECTL) apply -f apps/infra/pvc.yaml -n $(INFRA_NS)
 	$(KUBECTL) apply -f apps/infra/rbac.yaml
+	# Services before the StatefulSet — the postgres StatefulSet's governing headless
+	# Service (serviceName: postgres) must exist first for stable pod DNS on bring-up.
+	$(KUBECTL) apply -f apps/infra/service.yaml -n $(INFRA_NS)
 	$(KUBECTL) apply -f apps/infra/statefulset.yaml -n $(INFRA_NS)
 	$(KUBECTL) apply -f apps/infra/deployment.yaml -n $(INFRA_NS)
 	$(KUBECTL) apply -f apps/infra/daemonset.yaml -n $(INFRA_NS)
-	$(KUBECTL) apply -f apps/infra/service.yaml -n $(INFRA_NS)
 	$(KUBECTL) apply -f apps/infra/certificate.yaml -n $(INFRA_NS)
 	$(KUBECTL) apply -f apps/infra/ingress.yaml -n $(INFRA_NS)
+	# Inject the Adminer IP allow-list from $(ADMIN_CIDR) — keeps the real admin IP out of
+	# this public repo. JSON merge patch replaces sourceRange wholesale; unset keeps the
+	# committed fail-closed placeholder. See apps/infra/ingress.yaml for the env-var note.
+	$(KUBECTL) patch middleware adminer-ipallow -n $(INFRA_NS) --type merge \
+		-p '{"spec":{"ipAllowList":{"sourceRange":["$(ADMIN_CIDR)"]}}}'
 	# The legacy per-host Ingresses superseded by this consolidated host live in the
 	# hr-chatbot namespace (hr-chatbot-grafana / hr-chatbot-adminer) and must keep serving
 	# through the migration validation window — they are pruned at decommission, not here.

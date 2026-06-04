@@ -1,6 +1,8 @@
 # All shared-infra services are ClusterIP — consumed cross-namespace via the
 # FQDN <service>.infra.svc.cluster.local:<port>. Grafana and Adminer are also
 # exposed externally through the Ingresses in ingress.yaml.
+# Exception: `postgres` is a headless Service (clusterIP: None) — it is the
+# governing Service for the postgres StatefulSet (see statefulset.yaml).
 ---
 apiVersion: v1
 kind: Service
@@ -67,8 +69,16 @@ kind: Service
 metadata:
   name: postgres
   namespace: infra
+# Headless governing Service for the postgres StatefulSet (serviceName: postgres):
+# clusterIP: None gives the pod stable DNS (postgres-0.postgres.infra.svc.cluster.local),
+# the standard StatefulSet pairing. With replicas: 1 the bare name
+# postgres.infra.svc.cluster.local still resolves to the pod, so the hr-chatbot
+# DATABASE_URL host is unchanged. NOTE: clusterIP is immutable — on a cluster where this
+# Service already exists as a normal ClusterIP, delete it first
+# (kubectl delete svc postgres -n infra) before re-applying.
 spec:
   type: ClusterIP
+  clusterIP: None
   selector:
     app: postgres
   ports:

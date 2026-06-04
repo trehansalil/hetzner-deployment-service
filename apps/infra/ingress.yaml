@@ -88,10 +88,24 @@ spec:
 ---
 # Restrict the Adminer DB-admin UI to trusted source IPs. Adminer keeps no app-level
 # session (it is a stateless DB client), so without this its public login form is an
-# exposed attack surface (CVEs, brute-force). `ipAllowList` is Traefik v3 syntax; on
-# Traefik v2 the equivalent field is `ipWhiteList`. As shipped, sourceRange is an
-# RFC-5737 TEST-NET placeholder that matches no real client (fail-closed) — REPLACE it
-# with your admin CIDR(s) before deploying, or Adminer will be unreachable.
+# exposed attack surface (CVEs, brute-force).
+#
+# Traefik version: every object in this file uses the `traefik.io/v1alpha1` API group
+# and `ipAllowList`, i.e. Traefik v3 (k3s ships v3 by default on current releases). On
+# Traefik v2 this whole IngressRoute would need the old `traefik.containo.us` group and
+# `ipWhiteList`, so `ipAllowList` adds no version constraint the IngressRoute doesn't
+# already impose.
+#
+# sourceRange below is a fail-closed RFC-5737 TEST-NET placeholder that matches no real
+# client. The REAL admin CIDR is injected at deploy time from the $ADMIN_CIDR env var
+# (a `kubectl patch` in `make deploy-infra` and the infra workflow step), so the actual
+# admin IP is NEVER committed to this public repo:
+#     make deploy-infra ADMIN_CIDR=198.51.100.7/32
+# Leave ADMIN_CIDR unset and Adminer stays unreachable (fail-closed by default).
+# Residential IPs are usually dynamic — if /adminer starts returning 403, re-run
+# deploy-infra with the current IP (`curl -4 https://api.ipify.org`). Traefik reads the
+# direct remote address (single k3s node, no upstream LB); add `ipStrategy` only if a
+# proxy is ever placed in front.
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
 metadata:
@@ -100,7 +114,7 @@ metadata:
 spec:
   ipAllowList:
     sourceRange:
-      - 203.0.113.0/24   # REPLACE: your admin source IP/CIDR (e.g. 198.51.100.7/32)
+      - 203.0.113.0/24   # fail-closed placeholder; real value injected via $ADMIN_CIDR at deploy
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware

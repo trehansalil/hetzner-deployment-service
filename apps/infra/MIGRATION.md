@@ -171,9 +171,11 @@ kubectl get pods -n infra
 # pageindex: index + search against minio.infra + redis.infra
 # Prometheus targets — the *.svc.cluster.local DNS name only resolves in-cluster, so
 # port-forward from the operator's machine first (otherwise the curl silently DNS-fails).
-kubectl -n infra port-forward svc/prometheus 9090:9090 >/dev/null 2>&1 & PF=$!; sleep 3
-curl -s http://localhost:9090/api/v1/targets | jq '.data.activeTargets|length'
-kill $PF
+# Run in a subshell with a trap so the port-forward is always torn down — even if the
+# curl fails or you Ctrl+C mid-check — instead of leaking an orphaned background process.
+( kubectl -n infra port-forward svc/prometheus 9090:9090 >/dev/null 2>&1 & PF=$!; \
+  trap 'kill $PF 2>/dev/null' EXIT; sleep 3; \
+  curl -s http://localhost:9090/api/v1/targets | jq '.data.activeTargets|length' )
 ```
 
 **Resilience proof (the whole point of this migration):**
