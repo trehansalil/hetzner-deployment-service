@@ -57,7 +57,7 @@ jobs:
       # Shared infrastructure — manual deploys only (3rd-party images, no rollout).
       # Secrets are gitignored and must be created out-of-band (make k8s-secrets-infra).
       - name: Apply k8s manifests — infra
-        if: steps.vars.outputs.app == 'infra'
+        if: steps.vars.outputs.app == 'infra' && github.event_name == 'workflow_dispatch'
         run: |
           kubectl apply -f apps/infra/namespace.yaml
           kubectl apply -f apps/infra/configmap.yaml -n infra

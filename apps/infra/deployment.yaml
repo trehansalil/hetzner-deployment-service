@@ -136,7 +136,8 @@ spec:
           periodSeconds: 30
         readinessProbe:
           httpGet:
-            path: /minio/health/live
+            # readiness uses /ready (cluster/quorum view), not the /live liveness endpoint
+            path: /minio/health/ready
             port: 9000
           initialDelaySeconds: 15
           periodSeconds: 10

@@ -169,7 +169,11 @@ kubectl get pods -n infra
 # infra host: https://infra.saliltrehan.com/grafana, /adminer, /minio-console, /automation/ all load
 # hr-chatbot: chat round-trip (Postgres/pgvector)
 # pageindex: index + search against minio.infra + redis.infra
-curl -s http://prometheus.infra.svc.cluster.local:9090/api/v1/targets | jq '.data.activeTargets|length'
+# Prometheus targets — the *.svc.cluster.local DNS name only resolves in-cluster, so
+# port-forward from the operator's machine first (otherwise the curl silently DNS-fails).
+kubectl -n infra port-forward svc/prometheus 9090:9090 >/dev/null 2>&1 & PF=$!; sleep 3
+curl -s http://localhost:9090/api/v1/targets | jq '.data.activeTargets|length'
+kill $PF
 ```
 
 **Resilience proof (the whole point of this migration):**

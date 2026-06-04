@@ -142,13 +142,13 @@ spec:
     - websecure
   routes:
     # Grafana — prefix passed through unstripped (serve_from_sub_path handles it).
-    - match: Host(`infra.saliltrehan.com`) && PathPrefix(`/grafana`)
+    - match: Host(`infra.saliltrehan.com`) && (Path(`/grafana`) || PathPrefix(`/grafana/`))
       kind: Rule
       services:
         - name: grafana
           port: 3000
     # Adminer — strip + trailing-slash redirect (redirect runs first).
-    - match: Host(`infra.saliltrehan.com`) && PathPrefix(`/adminer`)
+    - match: Host(`infra.saliltrehan.com`) && (Path(`/adminer`) || PathPrefix(`/adminer/`))
       kind: Rule
       middlewares:
         - name: redirect-adminer-slash
@@ -156,9 +156,9 @@ spec:
       services:
         - name: adminer
           port: 8080
-    # MinIO Console — strip + trailing-slash redirect. Longer rule than /minio,
-    # so Traefik's default ordering evaluates this first.
-    - match: Host(`infra.saliltrehan.com`) && PathPrefix(`/minio-console`)
+    # MinIO Console — strip + trailing-slash redirect. Exact-or-subpath match, so it
+    # never overlaps the /minio S3 route below (no longer relies on rule ordering).
+    - match: Host(`infra.saliltrehan.com`) && (Path(`/minio-console`) || PathPrefix(`/minio-console/`))
       kind: Rule
       middlewares:
         - name: redirect-minio-console-slash
@@ -166,8 +166,9 @@ spec:
       services:
         - name: minio
           port: 9001
-    # MinIO S3 API — strip (≡ old nginx trailing-slash proxy_pass).
-    - match: Host(`infra.saliltrehan.com`) && PathPrefix(`/minio`)
+    # MinIO S3 API — strip (≡ old nginx trailing-slash proxy_pass). Exact-or-subpath
+    # match so /minio-console is not captured here.
+    - match: Host(`infra.saliltrehan.com`) && (Path(`/minio`) || PathPrefix(`/minio/`))
       kind: Rule
       middlewares:
         - name: strip-minio
@@ -175,7 +176,7 @@ spec:
         - name: minio
           port: 9000
     # n8n — prefix passed through unstripped (N8N_PATH=/automation/).
-    - match: Host(`infra.saliltrehan.com`) && PathPrefix(`/automation`)
+    - match: Host(`infra.saliltrehan.com`) && (Path(`/automation`) || PathPrefix(`/automation/`))
       kind: Rule
       services:
         - name: n8n
