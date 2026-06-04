@@ -7,17 +7,20 @@ metadata:
   namespace: neonatal-care
 data:
   TZ: "Asia/Kolkata"
-  DB_HOST: "neonatal-care-clickhouse"
+  # Stateful infra now lives in the `infra` namespace — reached via FQDN.
+  DB_HOST: "clickhouse.infra.svc.cluster.local"
   DB_NAME: "baby_tracker"
   DB_USER: "clickhouse"
   DB_PORT: "8123"
   CLICKHOUSE_DB: "baby_tracker"
   CLICKHOUSE_USER: "clickhouse"
-  MINIO_ENDPOINT: "neonatal-care-minio:9000"
-  MINIO_EXTERNAL_ENDPOINT: "neonate-logger.saliltrehan.com/minio"
-  REDIS_URL: "redis://neonatal-care-redis:6379/0"
-  N8N_HOST: "neonatal-care-n8n:5678"
-  WEBHOOK_URL: "https://neonate-logger.saliltrehan.com/automation/"
+  MINIO_ENDPOINT: "minio.infra.svc.cluster.local:9000"
+  # Infra UIs/endpoints are now served from the consolidated infra host
+  # (apps/infra/ingress.yaml), not proxied through this app's nginx anymore.
+  MINIO_EXTERNAL_ENDPOINT: "infra.saliltrehan.com/minio"
+  REDIS_URL: "redis://redis.infra.svc.cluster.local:6379/0"
+  N8N_HOST: "n8n.infra.svc.cluster.local:5678"
+  WEBHOOK_URL: "https://infra.saliltrehan.com/automation/"
   ENABLE_HTTPS: "false"          # TLS is terminated at the Ingress level in K8s
   ENABLE_BACKGROUND_NOTIFICATIONS: "false"
   EXTERNAL_TRANSCRIPTION_SERVICE_BOOL: "0"
@@ -67,36 +70,10 @@ data:
             proxy_set_header X-Forwarded-Proto $scheme;
         }
 
-        location /minio/ {
-            proxy_pass http://neonatal-care-minio:9000/;
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-        }
-
-        location /minio-console/ {
-            proxy_pass http://neonatal-care-minio:9001/;
-            proxy_set_header Host $host;
-            proxy_http_version 1.1;
-            proxy_set_header Upgrade $http_upgrade;
-            proxy_set_header Connection "upgrade";
-            sub_filter 'href="/' 'href="/minio-console/';
-            sub_filter 'src="/' 'src="/minio-console/';
-            sub_filter_once off;
-        }
-
-        location /automation/ {
-            proxy_pass http://neonatal-care-n8n:5678/;
-            proxy_set_header Host $host;
-            proxy_http_version 1.1;
-            proxy_set_header Upgrade $http_upgrade;
-            proxy_set_header Connection "upgrade";
-            sub_filter 'href="/' 'href="/automation/';
-            sub_filter 'src="/' 'src="/automation/';
-            sub_filter_once off;
-            sub_filter_types text/html text/css text/javascript application/javascript application/json;
-        }
-
-        location = /automation {
-            return 301 $scheme://$host/automation/;
-        }
+        # NOTE: the shared-infra UIs/endpoints (MinIO API + console, n8n) are no
+        # longer proxied here. They moved to the consolidated infra host:
+        #   https://infra.saliltrehan.com/minio
+        #   https://infra.saliltrehan.com/minio-console
+        #   https://infra.saliltrehan.com/automation
+        # routed by the Traefik IngressRoute in apps/infra/ingress.yaml.
     }

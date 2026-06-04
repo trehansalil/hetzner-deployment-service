@@ -5,15 +5,16 @@ metadata:
   namespace: neonatal-care
 spec:
   hard:
-    # Memory: sum of all limits (~5.5Gi) + ~1.5Gi rollout headroom
-    requests.memory: "3Gi"
-    limits.memory: "7Gi"
-    # CPU: prevents runaway processes from starving the node
-    requests.cpu: "1500m"
-    limits.cpu: "5000m"
+    # Sized for the stateless app only (backend + nginx + cleanup CronJob).
+    # The stateful datastores moved to the `infra` namespace, so this quota was
+    # relaxed from the original full-stack sizing.
+    requests.memory: "1Gi"
+    limits.memory: "3Gi"
+    requests.cpu: "750m"
+    limits.cpu: "3000m"
     # Pod count: hard stop against accumulation of evicted pod objects
-    pods: "20"
-    persistentvolumeclaims: "10"
+    pods: "15"
+    persistentvolumeclaims: "2"
     services: "10"
     count/jobs.batch: "5"
     count/cronjobs.batch: "5"

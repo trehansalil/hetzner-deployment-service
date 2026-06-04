@@ -19,6 +19,7 @@ on:
         default: 'neonatal-care'
         type: choice
         options:
+          - infra
           - neonatal-care
           - airline-hr-chatbot
           - pageindex-mcp
@@ -53,6 +54,26 @@ jobs:
           echo "app=$APP" >> $GITHUB_OUTPUT
           echo "image_tag=$TAG" >> $GITHUB_OUTPUT
 
+      # Shared infrastructure — manual deploys only (3rd-party images, no rollout).
+      # Secrets are gitignored and must be created out-of-band (make k8s-secrets-infra).
+      - name: Apply k8s manifests — infra
+        if: steps.vars.outputs.app == 'infra'
+        run: |
+          kubectl apply -f apps/infra/namespace.yaml
+          kubectl apply -f apps/infra/configmap.yaml -n infra
+          kubectl apply -f apps/infra/pvc.yaml -n infra
+          kubectl apply -f apps/infra/rbac.yaml
+          kubectl apply -f apps/infra/statefulset.yaml -n infra
+          kubectl apply -f apps/infra/deployment.yaml -n infra
+          kubectl apply -f apps/infra/daemonset.yaml -n infra
+          kubectl apply -f apps/infra/service.yaml -n infra
+          kubectl apply -f apps/infra/certificate.yaml -n infra
+          kubectl apply -f apps/infra/ingress.yaml -n infra
+          # Remove the legacy per-host Ingresses replaced by the consolidated
+          # infra.saliltrehan.com IngressRoute (apply does not prune renamed objects).
+          kubectl delete ingress infra-grafana infra-adminer -n infra --ignore-not-found
+          kubectl apply -f apps/infra/cronjob-pod-cleanup.yaml -n infra
+
       - name: Apply k8s manifests — neonatal-care
         if: steps.vars.outputs.app == 'neonatal-care'
         run: |
@@ -60,7 +81,6 @@ jobs:
           kubectl apply -f apps/neonatal-care/limitrange.yaml -n neonatal-care
           kubectl apply -f apps/neonatal-care/resourcequota.yaml -n neonatal-care
           kubectl apply -f apps/neonatal-care/configmap.yaml -n neonatal-care
-          kubectl apply -f apps/neonatal-care/pvc.yaml -n neonatal-care
           kubectl apply -f apps/neonatal-care/deployment.yaml -n neonatal-care
           kubectl apply -f apps/neonatal-care/service.yaml -n neonatal-care
           kubectl apply -f apps/neonatal-care/ingress.yaml -n neonatal-care
@@ -70,11 +90,7 @@ jobs:
         if: steps.vars.outputs.app == 'airline-hr-chatbot'
         run: |
           kubectl apply -f apps/airline-hr-chatbot/namespace.yaml
-          kubectl apply -f apps/airline-hr-chatbot/rbac.yaml
-          kubectl apply -f apps/airline-hr-chatbot/configmap.yaml -n hr-chatbot
-          kubectl apply -f apps/airline-hr-chatbot/pvc.yaml -n hr-chatbot
           kubectl apply -f apps/airline-hr-chatbot/deployment.yaml -n hr-chatbot
-          kubectl apply -f apps/airline-hr-chatbot/daemonset.yaml -n hr-chatbot
           kubectl apply -f apps/airline-hr-chatbot/service.yaml -n hr-chatbot
           kubectl apply -f apps/airline-hr-chatbot/ingress.yaml -n hr-chatbot
           kubectl apply -f apps/airline-hr-chatbot/cronjob-pod-cleanup.yaml -n hr-chatbot

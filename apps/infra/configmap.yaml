@@ -1,266 +1,41 @@
+# Non-secret configuration for the shared infrastructure services.
+# Secrets (passwords) live in secret.yaml (gitignored) — see secret.yaml.example.
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: postgres-init-sql
-  namespace: hr-chatbot
+  name: infra-config
+  namespace: infra
 data:
-  # Mounted at /docker-entrypoint-initdb.d/init.sql via subPath.
-  # The pgvector/pgvector:pg16 entrypoint runs this automatically on first start
-  # (when PGDATA is empty). All statements are idempotent — safe to re-run.
-  init.sql: |
-    -- =============================================================================
-    -- init.sql — Canonical bootstrap script for the Flydubai HR Chatbot database.
-    -- =============================================================================
-
-    -- EXTENSIONS
-    CREATE EXTENSION IF NOT EXISTS vector;
-    CREATE EXTENSION IF NOT EXISTS pg_trgm;
-
-    -- SHARED HELPERS
-    CREATE OR REPLACE FUNCTION keywords_to_text(TEXT[]) RETURNS TEXT
-        AS $$ SELECT array_to_string($1, ' ') $$
-        LANGUAGE SQL IMMUTABLE;
-
-    -- KNOWLEDGE BASE
-    CREATE TABLE IF NOT EXISTS knowledge_embeddings (
-        id             BIGSERIAL    PRIMARY KEY,
-        content        TEXT         NOT NULL,
-        source         TEXT         NOT NULL,
-        page           INTEGER,
-        chunk_index    INTEGER      NOT NULL DEFAULT 0,
-        file_hash      TEXT         NOT NULL,
-        chunk_keywords TEXT[]       NOT NULL DEFAULT '{}',
-        metadata       JSONB        NOT NULL DEFAULT '{}',
-        embedding      vector(2000) NOT NULL,
-        created_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW()
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_knowledge_embeddings_hnsw
-        ON knowledge_embeddings
-        USING hnsw (embedding vector_cosine_ops)
-        WITH (m = 16, ef_construction = 64);
-
-    CREATE INDEX IF NOT EXISTS idx_knowledge_embeddings_source
-        ON knowledge_embeddings (source);
-
-    CREATE INDEX IF NOT EXISTS idx_knowledge_embeddings_file_hash
-        ON knowledge_embeddings (file_hash);
-
-    CREATE INDEX IF NOT EXISTS idx_knowledge_chunk_keywords_gin
-        ON knowledge_embeddings USING GIN (chunk_keywords);
-
-    CREATE INDEX IF NOT EXISTS idx_knowledge_chunk_keywords_trgm
-        ON knowledge_embeddings USING GIN (keywords_to_text(chunk_keywords) gin_trgm_ops);
-
-    UPDATE knowledge_embeddings
-    SET chunk_keywords = ARRAY(
-        SELECT jsonb_array_elements_text(metadata->'chunk_keywords')
-    )
-    WHERE metadata ? 'chunk_keywords'
-      AND chunk_keywords = '{}';
-
-    -- SESSION EMBEDDINGS
-    CREATE TABLE IF NOT EXISTS session_embeddings (
-        id            BIGSERIAL    PRIMARY KEY,
-        content       TEXT         NOT NULL,
-        source        TEXT         NOT NULL,
-        page          INTEGER,
-        chunk_index   INTEGER      NOT NULL DEFAULT 0,
-        user_id       TEXT         NOT NULL,
-        session_id    TEXT         NOT NULL,
-        file_hash     TEXT         NOT NULL,
-        chunk_keywords TEXT[]      NOT NULL DEFAULT '{}',
-        metadata      JSONB        NOT NULL DEFAULT '{}',
-        embedding     vector(2000) NOT NULL,
-        created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW()
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_session_embeddings_session_id
-        ON session_embeddings (session_id);
-
-    CREATE INDEX IF NOT EXISTS idx_session_embeddings_user_id
-        ON session_embeddings (user_id);
-
-    CREATE INDEX IF NOT EXISTS idx_session_embeddings_file_hash
-        ON session_embeddings (file_hash);
-
-    CREATE INDEX IF NOT EXISTS idx_session_embeddings_hnsw
-        ON session_embeddings
-        USING hnsw (embedding vector_cosine_ops)
-        WITH (m = 16, ef_construction = 64);
-
-    CREATE INDEX IF NOT EXISTS idx_session_chunk_keywords_gin
-        ON session_embeddings USING GIN (chunk_keywords);
-
-    CREATE INDEX IF NOT EXISTS idx_session_chunk_keywords_trgm
-        ON session_embeddings USING GIN (keywords_to_text(chunk_keywords) gin_trgm_ops);
-
-    UPDATE session_embeddings
-    SET chunk_keywords = ARRAY(
-        SELECT jsonb_array_elements_text(metadata->'chunk_keywords')
-    )
-    WHERE metadata ? 'chunk_keywords'
-      AND chunk_keywords = '{}';
-
-    -- SESSION DOCUMENT LINKS
-    CREATE TABLE IF NOT EXISTS session_document_links (
-        id          BIGSERIAL   PRIMARY KEY,
-        file_hash   TEXT        NOT NULL,
-        user_id     TEXT        NOT NULL,
-        session_id  TEXT        NOT NULL,
-        linked_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        CONSTRAINT uq_session_document_links UNIQUE (file_hash, user_id, session_id)
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_session_document_links_session
-        ON session_document_links (session_id, user_id);
-
-    CREATE INDEX IF NOT EXISTS idx_session_document_links_hash
-        ON session_document_links (file_hash, user_id);
-
-    -- SESSION TABULAR FILES
-    CREATE TABLE IF NOT EXISTS session_tabular_files (
-        id              BIGSERIAL    PRIMARY KEY,
-        session_id      TEXT         NOT NULL,
-        user_id         TEXT         NOT NULL,
-        file_name       TEXT         NOT NULL,
-        file_hash       TEXT         NOT NULL,
-        file_type       TEXT         NOT NULL,
-        context_params  JSONB        NOT NULL DEFAULT '{}',
-        df_rows_json    JSONB,
-        embedding       vector(2000) NOT NULL,
-        uploaded_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-        CONSTRAINT uq_session_tabular_files UNIQUE (file_hash, user_id)
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_session_tabular_files_session
-        ON session_tabular_files (session_id, user_id);
-
-    CREATE INDEX IF NOT EXISTS idx_session_tabular_files_hash
-        ON session_tabular_files (file_hash, user_id);
-
-    CREATE INDEX IF NOT EXISTS idx_session_tabular_files_hnsw
-        ON session_tabular_files
-        USING hnsw (embedding vector_cosine_ops)
-        WITH (m = 16, ef_construction = 64);
-
-    -- KNOWLEDGE TABULAR FILES
-    CREATE TABLE IF NOT EXISTS knowledge_tabular_files (
-        id              BIGSERIAL    PRIMARY KEY,
-        file_name       TEXT         NOT NULL,
-        file_hash       TEXT         NOT NULL UNIQUE,
-        file_type       TEXT         NOT NULL,
-        context_params  JSONB        NOT NULL DEFAULT '{}',
-        df_rows_json    JSONB,
-        embedding       vector(2000) NOT NULL,
-        created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_knowledge_tabular_files_hash
-        ON knowledge_tabular_files (file_hash);
-
-    CREATE INDEX IF NOT EXISTS idx_knowledge_tabular_files_hnsw
-        ON knowledge_tabular_files
-        USING hnsw (embedding vector_cosine_ops)
-        WITH (m = 16, ef_construction = 64);
-
-    -- CHAINLIT PERSISTENCE TABLES
-    CREATE TABLE IF NOT EXISTS "User" (
-        "id"         UUID        PRIMARY KEY,
-        "identifier" TEXT        NOT NULL UNIQUE,
-        "metadata"   JSONB       NOT NULL DEFAULT '{}',
-        "createdAt"  TIMESTAMPTZ,
-        "updatedAt"  TIMESTAMPTZ
-    );
-
-    CREATE TABLE IF NOT EXISTS "Thread" (
-        "id"             UUID        PRIMARY KEY,
-        "createdAt"      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        "name"           TEXT,
-        "userId"         UUID        REFERENCES "User"("id") ON DELETE SET NULL,
-        "userIdentifier" TEXT,
-        "tags"           TEXT[],
-        "metadata"       JSONB       NOT NULL DEFAULT '{}',
-        "updatedAt"      TIMESTAMPTZ,
-        "deletedAt"      TIMESTAMPTZ
-    );
-
-    CREATE TABLE IF NOT EXISTS "Step" (
-        "id"         UUID        PRIMARY KEY,
-        "threadId"   UUID        REFERENCES "Thread"("id") ON DELETE CASCADE,
-        "parentId"   UUID,
-        "input"      TEXT,
-        "metadata"   JSONB       NOT NULL DEFAULT '{}',
-        "name"       TEXT,
-        "output"     TEXT,
-        "type"       TEXT        NOT NULL,
-        "startTime"  TIMESTAMPTZ,
-        "endTime"    TIMESTAMPTZ,
-        "showInput"  TEXT,
-        "isError"    BOOLEAN     NOT NULL DEFAULT FALSE
-    );
-
-    CREATE TABLE IF NOT EXISTS "Element" (
-        "id"          UUID    PRIMARY KEY,
-        "threadId"    UUID    REFERENCES "Thread"("id") ON DELETE CASCADE,
-        "stepId"      UUID    REFERENCES "Step"("id")   ON DELETE CASCADE,
-        "metadata"    JSONB   NOT NULL DEFAULT '{}',
-        "mime"        TEXT,
-        "name"        TEXT    NOT NULL,
-        "objectKey"   TEXT,
-        "url"         TEXT,
-        "chainlitKey" TEXT,
-        "display"     TEXT,
-        "size"        TEXT,
-        "language"    TEXT,
-        "page"        INT,
-        "props"       JSONB   NOT NULL DEFAULT '{}'
-    );
-
-    CREATE TABLE IF NOT EXISTS "Feedback" (
-        "id"      UUID  PRIMARY KEY,
-        "stepId"  UUID  NOT NULL REFERENCES "Step"("id") ON DELETE CASCADE,
-        "name"    TEXT  NOT NULL DEFAULT 'user_feedback',
-        "value"   FLOAT NOT NULL,
-        "comment" TEXT
-    );
-
-    -- SEED DATA
-    INSERT INTO "User" ("id", "identifier", "metadata", "createdAt")
-    VALUES
-        (gen_random_uuid(), 'EMP001',
-         '{"name": "Demo User",     "dept": "HR",               "grade": "Manager"}'::jsonb,
-         NOW()),
-        (gen_random_uuid(), 'EMP002',
-         '{"name": "Alice Johnson", "dept": "Finance",           "grade": "Senior Officer"}'::jsonb,
-         NOW()),
-        (gen_random_uuid(), 'EMP003',
-         '{"name": "Bob Smith",     "dept": "Flight Operations", "grade": "Captain"}'::jsonb,
-         NOW()),
-        (gen_random_uuid(), 'ADMIN001',
-         '{"name": "HR Admin", "dept": "HR", "grade": "HR Administrator", "is_admin": true}'::jsonb,
-         NOW())
-    ON CONFLICT ("identifier") DO NOTHING;
+  TZ: "Asia/Kolkata"
+  # ClickHouse server bootstrap (db + user). The matching password is in
+  # infra-secrets.CLICKHOUSE_PASSWORD. Clients (neonatal-care backend) connect
+  # with DB_USER/DB_PASSWORD from their own ConfigMap/Secret.
+  CLICKHOUSE_DB: "baby_tracker"
+  CLICKHOUSE_USER: "clickhouse"
+  # n8n public webhook base URL — served from the consolidated infra host
+  # (apps/infra/ingress.yaml routes /automation -> n8n:5678).
+  WEBHOOK_URL: "https://infra.saliltrehan.com/automation/"
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: prometheus-config
-  namespace: hr-chatbot
+  namespace: infra
 data:
   prometheus.yml: |
     global:
       scrape_interval: 15s
       evaluation_interval: 15s
       external_labels:
-        project: "hr-chatbot"
+        project: "cluster"
         env: "production"
 
     scrape_configs:
       - job_name: "hr-chatbot"
         metrics_path: /metrics
         static_configs:
-          - targets: ["app-metrics:9091"]
+          # app stays in the hr-chatbot namespace — scraped cross-namespace.
+          - targets: ["app-metrics.hr-chatbot.svc.cluster.local:9091"]
             labels:
               service: "hr-chatbot"
 
@@ -279,7 +54,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: loki-config
-  namespace: hr-chatbot
+  namespace: infra
 data:
   local-config.yaml: |
     auth_enabled: false
@@ -330,7 +105,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: promtail-config
-  namespace: hr-chatbot
+  namespace: infra
 data:
   config.yml: |
     server:
@@ -341,6 +116,7 @@ data:
       filename: /run/promtail/positions.yaml
 
     clients:
+      # loki is co-located in the infra namespace — short name resolves.
       - url: http://loki:3100/loki/api/v1/push
 
     scrape_configs:
@@ -349,6 +125,8 @@ data:
           - role: pod
             namespaces:
               names:
+                - infra
+                - neonatal-care
                 - hr-chatbot
                 - pageindex-mcp
 
@@ -392,7 +170,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: grafana-datasources
-  namespace: hr-chatbot
+  namespace: infra
 data:
   prometheus.yml: |
     apiVersion: 1
@@ -402,6 +180,7 @@ data:
         type: prometheus
         uid: prometheus
         access: proxy
+        # prometheus is co-located in infra — short name resolves.
         url: http://prometheus:9090
         isDefault: true
         editable: false
@@ -426,7 +205,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: grafana-dashboard-provider
-  namespace: hr-chatbot
+  namespace: infra
 data:
   dashboards.yml: |
     apiVersion: 1
@@ -446,7 +225,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: grafana-dashboard-json
-  namespace: hr-chatbot
+  namespace: infra
 data:
   hr_chatbot_overview.json: |
     {
@@ -690,7 +469,7 @@ data:
           "targets": [
             {
               "datasource": { "type": "loki", "uid": "loki" },
-              "expr": "{namespace=\"hr-chatbot\", service=~\"postgres|oracle\"}",
+              "expr": "{service=~\"postgres|oracle\"}",
               "legendFormat": "",
               "refId": "A"
             }
@@ -1059,7 +838,7 @@ data:
           "targets": [
             {
               "datasource": { "type": "loki", "uid": "loki" },
-              "expr": "{namespace=\"hr-chatbot\", service=\"postgres\"}",
+              "expr": "{namespace=\"infra\", service=\"postgres\"}",
               "refId": "A"
             }
           ],
@@ -1107,7 +886,7 @@ data:
           "targets": [
             {
               "datasource": { "type": "loki", "uid": "loki" },
-              "expr": "{namespace=\"hr-chatbot\", service=~\"prometheus|loki|promtail|grafana\"}",
+              "expr": "{namespace=\"infra\", service=~\"prometheus|loki|promtail|grafana\"}",
               "refId": "A"
             }
           ],
@@ -1476,3 +1255,247 @@ data:
       "uid": "pageindex-mcp-metrics",
       "version": 1
     }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init-sql
+  namespace: infra
+data:
+  # Mounted at /docker-entrypoint-initdb.d/init.sql via subPath.
+  # The pgvector/pgvector:pg16 entrypoint runs this automatically on first start
+  # (when PGDATA is empty). All statements are idempotent — safe to re-run.
+  init.sql: |
+    -- =============================================================================
+    -- init.sql — Canonical bootstrap script for the Flydubai HR Chatbot database.
+    -- =============================================================================
+
+    -- EXTENSIONS
+    CREATE EXTENSION IF NOT EXISTS vector;
+    CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
+    -- SHARED HELPERS
+    CREATE OR REPLACE FUNCTION keywords_to_text(TEXT[]) RETURNS TEXT
+        AS $$ SELECT array_to_string($1, ' ') $$
+        LANGUAGE SQL IMMUTABLE;
+
+    -- KNOWLEDGE BASE
+    CREATE TABLE IF NOT EXISTS knowledge_embeddings (
+        id             BIGSERIAL    PRIMARY KEY,
+        content        TEXT         NOT NULL,
+        source         TEXT         NOT NULL,
+        page           INTEGER,
+        chunk_index    INTEGER      NOT NULL DEFAULT 0,
+        file_hash      TEXT         NOT NULL,
+        chunk_keywords TEXT[]       NOT NULL DEFAULT '{}',
+        metadata       JSONB        NOT NULL DEFAULT '{}',
+        embedding      vector(2000) NOT NULL,
+        created_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_knowledge_embeddings_hnsw
+        ON knowledge_embeddings
+        USING hnsw (embedding vector_cosine_ops)
+        WITH (m = 16, ef_construction = 64);
+
+    CREATE INDEX IF NOT EXISTS idx_knowledge_embeddings_source
+        ON knowledge_embeddings (source);
+
+    CREATE INDEX IF NOT EXISTS idx_knowledge_embeddings_file_hash
+        ON knowledge_embeddings (file_hash);
+
+    CREATE INDEX IF NOT EXISTS idx_knowledge_chunk_keywords_gin
+        ON knowledge_embeddings USING GIN (chunk_keywords);
+
+    CREATE INDEX IF NOT EXISTS idx_knowledge_chunk_keywords_trgm
+        ON knowledge_embeddings USING GIN (keywords_to_text(chunk_keywords) gin_trgm_ops);
+
+    UPDATE knowledge_embeddings
+    SET chunk_keywords = ARRAY(
+        SELECT jsonb_array_elements_text(metadata->'chunk_keywords')
+    )
+    WHERE metadata ? 'chunk_keywords'
+      AND chunk_keywords = '{}';
+
+    -- SESSION EMBEDDINGS
+    CREATE TABLE IF NOT EXISTS session_embeddings (
+        id            BIGSERIAL    PRIMARY KEY,
+        content       TEXT         NOT NULL,
+        source        TEXT         NOT NULL,
+        page          INTEGER,
+        chunk_index   INTEGER      NOT NULL DEFAULT 0,
+        user_id       TEXT         NOT NULL,
+        session_id    TEXT         NOT NULL,
+        file_hash     TEXT         NOT NULL,
+        chunk_keywords TEXT[]      NOT NULL DEFAULT '{}',
+        metadata      JSONB        NOT NULL DEFAULT '{}',
+        embedding     vector(2000) NOT NULL,
+        created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_session_embeddings_session_id
+        ON session_embeddings (session_id);
+
+    CREATE INDEX IF NOT EXISTS idx_session_embeddings_user_id
+        ON session_embeddings (user_id);
+
+    CREATE INDEX IF NOT EXISTS idx_session_embeddings_file_hash
+        ON session_embeddings (file_hash);
+
+    CREATE INDEX IF NOT EXISTS idx_session_embeddings_hnsw
+        ON session_embeddings
+        USING hnsw (embedding vector_cosine_ops)
+        WITH (m = 16, ef_construction = 64);
+
+    CREATE INDEX IF NOT EXISTS idx_session_chunk_keywords_gin
+        ON session_embeddings USING GIN (chunk_keywords);
+
+    CREATE INDEX IF NOT EXISTS idx_session_chunk_keywords_trgm
+        ON session_embeddings USING GIN (keywords_to_text(chunk_keywords) gin_trgm_ops);
+
+    UPDATE session_embeddings
+    SET chunk_keywords = ARRAY(
+        SELECT jsonb_array_elements_text(metadata->'chunk_keywords')
+    )
+    WHERE metadata ? 'chunk_keywords'
+      AND chunk_keywords = '{}';
+
+    -- SESSION DOCUMENT LINKS
+    CREATE TABLE IF NOT EXISTS session_document_links (
+        id          BIGSERIAL   PRIMARY KEY,
+        file_hash   TEXT        NOT NULL,
+        user_id     TEXT        NOT NULL,
+        session_id  TEXT        NOT NULL,
+        linked_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CONSTRAINT uq_session_document_links UNIQUE (file_hash, user_id, session_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_session_document_links_session
+        ON session_document_links (session_id, user_id);
+
+    CREATE INDEX IF NOT EXISTS idx_session_document_links_hash
+        ON session_document_links (file_hash, user_id);
+
+    -- SESSION TABULAR FILES
+    CREATE TABLE IF NOT EXISTS session_tabular_files (
+        id              BIGSERIAL    PRIMARY KEY,
+        session_id      TEXT         NOT NULL,
+        user_id         TEXT         NOT NULL,
+        file_name       TEXT         NOT NULL,
+        file_hash       TEXT         NOT NULL,
+        file_type       TEXT         NOT NULL,
+        context_params  JSONB        NOT NULL DEFAULT '{}',
+        df_rows_json    JSONB,
+        embedding       vector(2000) NOT NULL,
+        uploaded_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+        CONSTRAINT uq_session_tabular_files UNIQUE (file_hash, user_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_session_tabular_files_session
+        ON session_tabular_files (session_id, user_id);
+
+    CREATE INDEX IF NOT EXISTS idx_session_tabular_files_hash
+        ON session_tabular_files (file_hash, user_id);
+
+    CREATE INDEX IF NOT EXISTS idx_session_tabular_files_hnsw
+        ON session_tabular_files
+        USING hnsw (embedding vector_cosine_ops)
+        WITH (m = 16, ef_construction = 64);
+
+    -- KNOWLEDGE TABULAR FILES
+    CREATE TABLE IF NOT EXISTS knowledge_tabular_files (
+        id              BIGSERIAL    PRIMARY KEY,
+        file_name       TEXT         NOT NULL,
+        file_hash       TEXT         NOT NULL UNIQUE,
+        file_type       TEXT         NOT NULL,
+        context_params  JSONB        NOT NULL DEFAULT '{}',
+        df_rows_json    JSONB,
+        embedding       vector(2000) NOT NULL,
+        created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_knowledge_tabular_files_hash
+        ON knowledge_tabular_files (file_hash);
+
+    CREATE INDEX IF NOT EXISTS idx_knowledge_tabular_files_hnsw
+        ON knowledge_tabular_files
+        USING hnsw (embedding vector_cosine_ops)
+        WITH (m = 16, ef_construction = 64);
+
+    -- CHAINLIT PERSISTENCE TABLES
+    CREATE TABLE IF NOT EXISTS "User" (
+        "id"         UUID        PRIMARY KEY,
+        "identifier" TEXT        NOT NULL UNIQUE,
+        "metadata"   JSONB       NOT NULL DEFAULT '{}',
+        "createdAt"  TIMESTAMPTZ,
+        "updatedAt"  TIMESTAMPTZ
+    );
+
+    CREATE TABLE IF NOT EXISTS "Thread" (
+        "id"             UUID        PRIMARY KEY,
+        "createdAt"      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        "name"           TEXT,
+        "userId"         UUID        REFERENCES "User"("id") ON DELETE SET NULL,
+        "userIdentifier" TEXT,
+        "tags"           TEXT[],
+        "metadata"       JSONB       NOT NULL DEFAULT '{}',
+        "updatedAt"      TIMESTAMPTZ,
+        "deletedAt"      TIMESTAMPTZ
+    );
+
+    CREATE TABLE IF NOT EXISTS "Step" (
+        "id"         UUID        PRIMARY KEY,
+        "threadId"   UUID        REFERENCES "Thread"("id") ON DELETE CASCADE,
+        "parentId"   UUID,
+        "input"      TEXT,
+        "metadata"   JSONB       NOT NULL DEFAULT '{}',
+        "name"       TEXT,
+        "output"     TEXT,
+        "type"       TEXT        NOT NULL,
+        "startTime"  TIMESTAMPTZ,
+        "endTime"    TIMESTAMPTZ,
+        "showInput"  TEXT,
+        "isError"    BOOLEAN     NOT NULL DEFAULT FALSE
+    );
+
+    CREATE TABLE IF NOT EXISTS "Element" (
+        "id"          UUID    PRIMARY KEY,
+        "threadId"    UUID    REFERENCES "Thread"("id") ON DELETE CASCADE,
+        "stepId"      UUID    REFERENCES "Step"("id")   ON DELETE CASCADE,
+        "metadata"    JSONB   NOT NULL DEFAULT '{}',
+        "mime"        TEXT,
+        "name"        TEXT    NOT NULL,
+        "objectKey"   TEXT,
+        "url"         TEXT,
+        "chainlitKey" TEXT,
+        "display"     TEXT,
+        "size"        TEXT,
+        "language"    TEXT,
+        "page"        INT,
+        "props"       JSONB   NOT NULL DEFAULT '{}'
+    );
+
+    CREATE TABLE IF NOT EXISTS "Feedback" (
+        "id"      UUID  PRIMARY KEY,
+        "stepId"  UUID  NOT NULL REFERENCES "Step"("id") ON DELETE CASCADE,
+        "name"    TEXT  NOT NULL DEFAULT 'user_feedback',
+        "value"   FLOAT NOT NULL,
+        "comment" TEXT
+    );
+
+    -- SEED DATA
+    INSERT INTO "User" ("id", "identifier", "metadata", "createdAt")
+    VALUES
+        (gen_random_uuid(), 'EMP001',
+         '{"name": "Demo User",     "dept": "HR",               "grade": "Manager"}'::jsonb,
+         NOW()),
+        (gen_random_uuid(), 'EMP002',
+         '{"name": "Alice Johnson", "dept": "Finance",           "grade": "Senior Officer"}'::jsonb,
+         NOW()),
+        (gen_random_uuid(), 'EMP003',
+         '{"name": "Bob Smith",     "dept": "Flight Operations", "grade": "Captain"}'::jsonb,
+         NOW()),
+        (gen_random_uuid(), 'ADMIN001',
+         '{"name": "HR Admin", "dept": "HR", "grade": "HR Administrator", "is_admin": true}'::jsonb,
+         NOW())
+    ON CONFLICT ("identifier") DO NOTHING;

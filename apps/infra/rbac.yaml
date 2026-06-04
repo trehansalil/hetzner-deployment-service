@@ -1,16 +1,21 @@
 # Promtail needs to list/watch Kubernetes pods and nodes to discover log targets.
 # Grants minimum permissions for kubernetes_sd_configs role: pod.
+#
+# The ClusterRole/ClusterRoleBinding are named 'promtail-infra' (NOT the legacy
+# 'promtail-hr-chatbot') so they can coexist with the old binding during migration
+# and are cleaned up explicitly by `make destroy-infra` (kubectl delete namespace
+# does not remove cluster-scoped resources).
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: promtail
-  namespace: hr-chatbot
+  namespace: infra
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: promtail-hr-chatbot
+  name: promtail-infra
 rules:
   - apiGroups: [""]
     resources:
@@ -25,12 +30,12 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: promtail-hr-chatbot
+  name: promtail-infra
 subjects:
   - kind: ServiceAccount
     name: promtail
-    namespace: hr-chatbot
+    namespace: infra
 roleRef:
   kind: ClusterRole
-  name: promtail-hr-chatbot
+  name: promtail-infra
   apiGroup: rbac.authorization.k8s.io

@@ -1,0 +1,213 @@
+# Consolidated external entry point for all infra UIs/endpoints under a SINGLE
+# host, infra.saliltrehan.com, with path-based routing. This replaces the two
+# former per-service hosts (grafana-hr.saliltrehan.com, adminer-hr.saliltrehan.com)
+# AND the infra paths that used to be proxied through the neonatal-care nginx
+# (neonate-logger.saliltrehan.com/{minio,minio-console,automation}).
+#
+# It is a Traefik IngressRoute (not a standard Ingress) because per-path
+# StripPrefix / redirect middlewares and route-priority control are required —
+# the same CRD pattern as apps/pageindex-mcp/ingress.yaml. cert-manager's
+# ingress-shim does NOT auto-issue certs for IngressRoutes, so the TLS cert is
+# declared explicitly in certificate.yaml (secret infra-tls, same namespace).
+#
+# Prerequisites:
+#   1. cert-manager + ClusterIssuer 'letsencrypt-prod' (make cluster-init)
+#   2. DNS A record: infra.saliltrehan.com -> Hetzner server IP
+#
+# Route map (host = infra.saliltrehan.com):
+#   /grafana        -> grafana:3000   NO strip   (Grafana serves under the subpath itself)
+#   /adminer        -> adminer:8080   StripPrefix + trailing-slash redirect
+#   /minio-console  -> minio:9001     StripPrefix + trailing-slash redirect
+#   /minio          -> minio:9000     StripPrefix (S3 API; like-for-like with the old nginx)
+#   /automation     -> n8n:5678       NO strip   (n8n serves under N8N_PATH=/automation/)
+#   /               -> 302 -> /grafana/   (convenience landing; exact-match only)
+#
+# Route ordering: priorities are LEFT TO TRAEFIK'S DEFAULT (longer rule wins),
+# so PathPrefix(`/minio-console`) automatically outranks PathPrefix(`/minio`)
+# and a request to /minio-console/* is never captured by the /minio (S3 API)
+# route. The root landing uses Path(`/`) (EXACT match), so it cannot shadow any
+# /<prefix> route regardless of priority. No explicit `priority:` is set
+# anywhere — setting it on some routers but not others is the documented way to
+# accidentally invert this ordering, so we don't.
+#
+# Strip vs no-strip is per-backend and load-bearing (verified per backend):
+#   * Grafana 10.x: NO strip + GF_SERVER_SERVE_FROM_SUB_PATH=true. The broken
+#     combo (strip + serve_from_sub_path) causes an infinite 301 loop (#72577).
+#   * n8n: NO strip + N8N_PATH=/automation/. Strip would 404 every asset.
+#   * Adminer: strip REQUIRED (no base-path env; emits relative URLs) — plus the
+#     trailing-slash redirect, which is the actual load-bearing piece.
+#   * MinIO console: strip REQUIRED; base path comes from MINIO_BROWSER_REDIRECT_URL.
+#   * MinIO S3 API: strip is functionally identical to the old nginx
+#     `proxy_pass .../minio:9000/` (trailing slash). Presigned URLs keep working
+#     iff the app signs against the INTERNAL endpoint (MINIO_ENDPOINT, no /minio)
+#     and uses MINIO_EXTERNAL_ENDPOINT only for display — the current pattern.
+#     (A dedicated host at root would be the clean way to hand browsers
+#     presigned URLs over a custom path; out of scope for this like-for-like move.)
+#
+# Realtime: Traefik passes WebSocket Upgrade/Connection headers and SSE streams
+# through transparently — no nginx-style proxy_set_header Upgrade / X-Accel-
+# Buffering needed. /grafana/api/live/ws, /automation/rest/push, and
+# /minio-console/ws/objectManager all work as long as the prefix is preserved
+# (Grafana/n8n) or stripped (console). All three backends run at replicas:1
+# (Recreate); scaling any beyond 1 would require a Traefik sticky cookie.
+
+# ─── Middlewares ────────────────────────────────────────────────────────────
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: redirect-https
+  namespace: infra
+spec:
+  redirectScheme:
+    scheme: https
+    permanent: true
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: strip-adminer
+  namespace: infra
+spec:
+  stripPrefix:
+    prefixes:
+      - /adminer
+---
+# Force a trailing slash on the bare /adminer so Adminer's relative asset/link
+# URLs resolve under /adminer/ (without it, CSS/JS 404 and login breaks).
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: redirect-adminer-slash
+  namespace: infra
+spec:
+  redirectRegex:
+    regex: "^(https?://[^/]+)/adminer$"
+    replacement: "${1}/adminer/"
+    permanent: true
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: strip-minio
+  namespace: infra
+spec:
+  stripPrefix:
+    prefixes:
+      - /minio
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: strip-minio-console
+  namespace: infra
+spec:
+  stripPrefix:
+    prefixes:
+      - /minio-console
+---
+# Force a trailing slash on the bare /minio-console so the console SPA bootstrap
+# resolves correctly.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: redirect-minio-console-slash
+  namespace: infra
+spec:
+  redirectRegex:
+    regex: "^(https?://[^/]+)/minio-console$"
+    replacement: "${1}/minio-console/"
+    permanent: true
+---
+# Bare host / root -> Grafana (convenience landing).
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: redirect-root-grafana
+  namespace: infra
+spec:
+  redirectRegex:
+    regex: "^(https?://[^/]+)/?$"
+    replacement: "${1}/grafana/"
+    permanent: false
+# ─── HTTPS IngressRoute (primary) ─────────────────────────────────────────────
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: infra
+  namespace: infra
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    # Grafana — prefix passed through unstripped (serve_from_sub_path handles it).
+    - match: Host(`infra.saliltrehan.com`) && PathPrefix(`/grafana`)
+      kind: Rule
+      services:
+        - name: grafana
+          port: 3000
+    # Adminer — strip + trailing-slash redirect (redirect runs first).
+    - match: Host(`infra.saliltrehan.com`) && PathPrefix(`/adminer`)
+      kind: Rule
+      middlewares:
+        - name: redirect-adminer-slash
+        - name: strip-adminer
+      services:
+        - name: adminer
+          port: 8080
+    # MinIO Console — strip + trailing-slash redirect. Longer rule than /minio,
+    # so Traefik's default ordering evaluates this first.
+    - match: Host(`infra.saliltrehan.com`) && PathPrefix(`/minio-console`)
+      kind: Rule
+      middlewares:
+        - name: redirect-minio-console-slash
+        - name: strip-minio-console
+      services:
+        - name: minio
+          port: 9001
+    # MinIO S3 API — strip (≡ old nginx trailing-slash proxy_pass).
+    - match: Host(`infra.saliltrehan.com`) && PathPrefix(`/minio`)
+      kind: Rule
+      middlewares:
+        - name: strip-minio
+      services:
+        - name: minio
+          port: 9000
+    # n8n — prefix passed through unstripped (N8N_PATH=/automation/).
+    - match: Host(`infra.saliltrehan.com`) && PathPrefix(`/automation`)
+      kind: Rule
+      services:
+        - name: n8n
+          port: 5678
+    # Root landing — EXACT match only, redirects to /grafana/. The grafana
+    # service is a required-but-unreached placeholder (the redirect 302s first).
+    - match: Host(`infra.saliltrehan.com`) && Path(`/`)
+      kind: Rule
+      middlewares:
+        - name: redirect-root-grafana
+      services:
+        - name: grafana
+          port: 3000
+  tls:
+    secretName: infra-tls
+# ─── HTTP -> HTTPS redirect ───────────────────────────────────────────────────
+# Redundant with the global redirect in cluster/traefik-config.yaml, but kept
+# for parity with apps/pageindex-mcp/ingress.yaml and host-local clarity.
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: infra-http
+  namespace: infra
+spec:
+  entryPoints:
+    - web
+  routes:
+    - match: Host(`infra.saliltrehan.com`)
+      kind: Rule
+      middlewares:
+        - name: redirect-https
+      services:
+        - name: grafana
+          port: 3000
