@@ -53,10 +53,5 @@ spec:
               # this shared 7.6Gi single node.
               memory: "512Mi"
             limits:
-              cpu: "1000m"
-              # Measured peak (2026-06-04, ACCURATE + threads=1) is ~1.92Gi total anon
-              # on real German insurance PDFs; 1Gi was ~2x too small and OOMKilled.
-              # 2Gi clears the anon floor (file cache is reclaimable under the limit).
-              # Headroom is thin (~80Mi over AVB peak) — the durable fix is the Docling
-              # pipeline downgrade, not a bigger limit (node can't spare 2.5Gi).
-              memory: "2Gi"
+              cpu: "2000m"
+              memory: "2500Mi"
