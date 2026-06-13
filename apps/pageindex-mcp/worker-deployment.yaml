@@ -4,7 +4,7 @@ metadata:
   name: pageindex-mcp-worker
   namespace: pageindex-mcp
 spec:
-  replicas: 1
+  # replicas is owned by the KEDA ScaledObject (worker-scaledobject.yaml): 1↔2.
   strategy:
     type: RollingUpdate
     rollingUpdate:

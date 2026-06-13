@@ -1,0 +1,26 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: pageindex-mcp-worker
+  namespace: pageindex-mcp
+spec:
+  scaleTargetRef:
+    name: pageindex-mcp-worker
+  minReplicaCount: 1
+  maxReplicaCount: 2
+  # Slow scale-down so a brief queue dip doesn't kill the 2nd pod mid-batch.
+  cooldownPeriod: 120
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 120
+  triggers:
+    - type: prometheus
+      metricType: AverageValue
+      metadata:
+        serverAddress: http://prometheus.infra.svc.cluster.local:9090
+        # threshold=1 → desiredReplicas = ceil(queue_depth / 1), capped at
+        # maxReplicaCount=2. So the 2nd pod is added once ≥2 jobs are waiting.
+        threshold: "1"
+        query: pageindex_arq_queue_depth
