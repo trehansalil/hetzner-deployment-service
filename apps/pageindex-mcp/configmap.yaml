@@ -36,3 +36,13 @@ data:
   MKL_NUM_THREADS: "1"
   OPENBLAS_NUM_THREADS: "1"
   NUMEXPR_NUM_THREADS: "1"
+  # --- Worker concurrency / memory-admission (see worker-scaledobject.yaml) ---
+  # Node MemAvailable floor (bytes) required before a worker starts a conversion.
+  # ~2.2Gi = one ~1.9Gi Docling job + margin on the 7.6Gi node.
+  MEM_ADMISSION_FLOOR_BYTES: "2300000000"
+  # Hard cap (s) a job waits for headroom before proceeding anyway (fail-open).
+  MEM_ADMISSION_MAX_WAIT_S: "120"
+  # Re-check cadence (s) while waiting for headroom.
+  MEM_ADMISSION_POLL_S: "3"
+  # How often the server publishes pageindex_arq_queue_depth (s).
+  ARQ_QUEUE_DEPTH_SCRAPE_INTERVAL_S: "5"
