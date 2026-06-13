@@ -8,8 +8,8 @@ spec:
     name: pageindex-mcp-worker
   minReplicaCount: 1
   maxReplicaCount: 2
-  # Slow scale-down so a brief queue dip doesn't kill the 2nd pod mid-batch.
-  cooldownPeriod: 120
+  # Scale-down is governed by the HPA stabilization window below (cooldownPeriod
+  # only applies when minReplicaCount=0, so it is omitted here at min=1).
   advanced:
     horizontalPodAutoscalerConfig:
       behavior:
