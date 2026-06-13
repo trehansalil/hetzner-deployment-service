@@ -1016,6 +1016,110 @@ data:
           ],
           "title": "Log Volume by Level",
           "type": "timeseries"
+        },
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 39 },
+          "id": 7,
+          "title": "MCP Worker Logs",
+          "type": "row"
+        },
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "gridPos": { "h": 14, "w": 24, "x": 0, "y": 40 },
+          "id": 8,
+          "options": {
+            "dedupStrategy": "none",
+            "enableLogDetails": true,
+            "prettifyLogMessage": true,
+            "showCommonLabels": false,
+            "showLabels": false,
+            "showTime": true,
+            "sortOrder": "Descending",
+            "wrapLogMessage": true
+          },
+          "targets": [
+            {
+              "datasource": { "type": "loki", "uid": "loki" },
+              "expr": "{namespace=\"pageindex-mcp\", service=\"pageindex-mcp-worker\"}",
+              "refId": "A"
+            }
+          ],
+          "title": "All Worker Logs",
+          "type": "logs"
+        },
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 54 },
+          "id": 9,
+          "title": "Worker Errors & Warnings",
+          "type": "row"
+        },
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "gridPos": { "h": 12, "w": 24, "x": 0, "y": 55 },
+          "id": 10,
+          "options": {
+            "dedupStrategy": "signature",
+            "enableLogDetails": true,
+            "prettifyLogMessage": true,
+            "showCommonLabels": false,
+            "showLabels": true,
+            "showTime": true,
+            "sortOrder": "Descending",
+            "wrapLogMessage": true
+          },
+          "targets": [
+            {
+              "datasource": { "type": "loki", "uid": "loki" },
+              "expr": "{namespace=\"pageindex-mcp\", service=\"pageindex-mcp-worker\"} | json | drop __error__, __error_details__ | level=~\"error|warning\" | line_format \"[{{.level}}] {{.message}}\"",
+              "refId": "A"
+            }
+          ],
+          "title": "Worker Warnings & Errors",
+          "type": "logs"
+        },
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 67 },
+          "id": 11,
+          "title": "Worker Log Volume",
+          "type": "row"
+        },
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "fieldConfig": {
+            "defaults": { "color": { "mode": "palette-classic" }, "unit": "short" },
+            "overrides": []
+          },
+          "gridPos": { "h": 10, "w": 24, "x": 0, "y": 68 },
+          "id": 12,
+          "options": {
+            "tooltip": { "mode": "multi" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["sum"] }
+          },
+          "targets": [
+            {
+              "datasource": { "type": "loki", "uid": "loki" },
+              "expr": "sum(count_over_time({namespace=\"pageindex-mcp\", service=\"pageindex-mcp-worker\"} | json | drop __error__, __error_details__ | level=\"error\" [5m]))",
+              "legendFormat": "errors",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "loki", "uid": "loki" },
+              "expr": "sum(count_over_time({namespace=\"pageindex-mcp\", service=\"pageindex-mcp-worker\"} | json | drop __error__, __error_details__ | level=\"warning\" [5m]))",
+              "legendFormat": "warnings",
+              "refId": "B"
+            },
+            {
+              "datasource": { "type": "loki", "uid": "loki" },
+              "expr": "sum(count_over_time({namespace=\"pageindex-mcp\", service=\"pageindex-mcp-worker\"} | json | drop __error__, __error_details__ | level=\"info\" [5m]))",
+              "legendFormat": "info",
+              "refId": "C"
+            }
+          ],
+          "title": "Worker Log Volume by Level",
+          "type": "timeseries"
         }
       ],
       "refresh": "30s",
