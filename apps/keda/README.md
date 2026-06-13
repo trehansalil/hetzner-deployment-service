@@ -8,7 +8,8 @@ to scale the PageIndex worker 1↔2 on arq queue depth.
     kubectl apply -f apps/keda/namespace.yaml
     helm repo add kedacore https://kedacore.github.io/charts
     helm repo update
-    helm install keda kedacore/keda --namespace keda --version 2.x
+    # Latest stable. To pin: `helm search repo kedacore/keda --versions`, then add --version <x.y.z>.
+    helm install keda kedacore/keda --namespace keda
 
 ## Verify
 
