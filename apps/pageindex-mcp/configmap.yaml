@@ -53,3 +53,12 @@ data:
   MEM_ADMISSION_POLL_S: "3"
   # How often the server publishes pageindex_arq_queue_depth (s).
   ARQ_QUEUE_DEPTH_SCRAPE_INTERVAL_S: "5"
+  # --- Langfuse tracing (LLM-02) -------------------------------------------
+  # Non-sensitive levers; the keys live in the Secret. Tracing activates only
+  # when BOTH LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY are set (Secret).
+  # EU region (default); US = https://us.cloud.langfuse.com.
+  LANGFUSE_HOST: "https://cloud.langfuse.com"
+  # true = export full prompt/completion bodies (incl. document text) to
+  # Langfuse Cloud; false = mask bodies, keep token usage + cost. NOTE (HR3):
+  # this corpus is potential PII — true means document text leaves the cluster.
+  LANGFUSE_TRACE_CONTENT: "true"
