@@ -13,19 +13,26 @@ data:
   REDIS_URL: "redis://redis.infra.svc.cluster.local:6379/1"
   WEB_CONCURRENCY: "1"
   CACHE_TTL: "300"
+  # LLM-01 routing lever (auto|openai|compatible|azure). Set explicitly so a
+  # misconfiguration fails fast at startup (resolve_llm_provider). "azure" is the
+  # active profile here. To target an OpenAI-compatible endpoint instead, set
+  # "compatible", switch the models below to the bare names your endpoint serves,
+  # and change the worker overrides from "azure/" to "openai/".
+  LLM_PROVIDER: "azure"
   # Bare Azure deployment name. Used directly by AsyncAzureOpenAI in the server's
-  # tool path (helpers.py / config.py:get_openai_client). The worker uses litellm
-  # via the pageindex library and overrides these to "azure/<deployment>" in
+  # tool path (config.py:get_openai_client). The worker uses litellm via the
+  # pageindex library and overrides these to "azure/<deployment>" in
   # worker-deployment.yaml — litellm needs the provider prefix to route to Azure.
   PAGEINDEX_MODEL: "gpt-4.1"
   PAGEINDEX_FILTER_MODEL: "gpt-4.1"
   PAGEINDEX_SEARCH_MODEL: "gpt-4.1"
   PAGEINDEX_SEARCH_CONCURRENCY: "3"
-  # Azure OpenAI routing for litellm (worker side). Endpoint URL and API version
-  # are non-sensitive. The matching AZURE_API_KEY (mirror of OPENAI_API_KEY when
-  # OPENAI_BASE_URL is an Azure resource) lives in pageindex-mcp-secrets.
+  # Azure OpenAI routing for litellm (worker side). API version is non-sensitive.
+  # NOTE (LLM-01): configure_litellm() derives AZURE_API_BASE from OPENAI_BASE_URL
+  # and AZURE_API_KEY from OPENAI_API_KEY at runtime, so OPENAI_BASE_URL (in the
+  # Secret) is the single source of truth and MUST equal AZURE_API_BASE below.
   AZURE_API_BASE: "https://techlotus-openai-api.openai.azure.com"
-  AZURE_API_VERSION: "2024-08-01-preview"
+  AZURE_API_VERSION: "2025-01-01-preview"
   # Native math-library thread caps. Without these, torch/onnxruntime/BLAS spawn
   # one thread per host vCPU (~4 on this node), which both saturates ~2 cores (the
   # observed "2x CPU" spike) and inflates per-thread scratch arenas that push the

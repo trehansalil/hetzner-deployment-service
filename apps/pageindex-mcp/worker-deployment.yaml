@@ -25,12 +25,16 @@ spec:
           image: ghcr.io/trehansalil/pageindex-mcp:latest
           imagePullPolicy: Always
           command: ["arq", "pageindex_mcp.worker.WorkerSettings"]
-          # litellm (called by the pageindex library) routes to Azure only when
-          # the model name carries the "azure/" prefix. The server side, which
-          # uses AsyncAzureOpenAI directly, wants the bare deployment name and
-          # inherits the unprefixed value from the ConfigMap. These overrides
-          # exist solely to bridge that mismatch — drop them once config.py
-          # auto-prefixes for Azure.
+          # AZURE PROFILE (active; pairs with LLM_PROVIDER=azure in the ConfigMap).
+          # litellm (called by the pageindex library) routes to Azure only when the
+          # model name carries the "azure/" prefix. The server side uses
+          # AsyncAzureOpenAI directly and wants the bare deployment name, which it
+          # inherits from the ConfigMap. These overrides exist solely to bridge that
+          # mismatch.
+          #
+          # COMPATIBLE PROFILE: set LLM_PROVIDER=compatible in the ConfigMap and swap
+          # the three values below from "azure/<deployment>" to "openai/<model>"
+          # (e.g. "openai/gpt-5.3-instant") served by your OPENAI_BASE_URL endpoint.
           env:
             - name: PAGEINDEX_MODEL
               value: "azure/gpt-4.1"
