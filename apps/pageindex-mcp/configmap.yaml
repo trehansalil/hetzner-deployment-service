@@ -62,3 +62,15 @@ data:
   # Langfuse Cloud; false = mask bodies, keep token usage + cost. NOTE (HR3):
   # this corpus is potential PII — true means document text leaves the cluster.
   LANGFUSE_TRACE_CONTENT: "true"
+  # --- RFC-006 document registry (Postgres dual-write) --------------------
+  # Gate for the Postgres-backed registry. Code default is "true", so setting
+  # this explicitly is only useful when you need an off switch. The DSN itself
+  # lives in the Secret (POSTGRES_DSN); see apps/infra/jobs/init-pageindex-db-job.yaml.
+  REGISTRY_ENABLED: "true"
+  # Catalog top-K rows returned by the registry listing path.
+  PAGEINDEX_CATALOG_TOPK: "200"
+  # --- RFC-016 VLM last-resort garble fallback ----------------------------
+  # true = fall back to the VLM model when deterministic + Approach-B routes
+  # both produce garbled text. Costs extra LLM calls; leave off unless needed.
+  VLM_FALLBACK: "false"
+  VLM_MODEL: "gpt-4.1"
