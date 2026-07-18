@@ -1,0 +1,74 @@
+# One-time K8s Job to provision the `pageindex` role + database inside the
+# shared infra postgres StatefulSet.
+#
+# Run after the postgres pod is healthy:
+#   make init-pageindex-db
+#
+# Requires infra-secrets.PAGEINDEX_DB_PASSWORD to be set (see
+# apps/infra/secret.yaml.example). The pageindex-mcp app then connects via
+# POSTGRES_DSN (pageindex-mcp-secrets), host postgres.infra.svc.cluster.local.
+#
+# Idempotent: safe to re-run.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: init-pageindex-db
+  namespace: infra
+  labels:
+    app: postgres
+    job-type: db-init
+spec:
+  ttlSecondsAfterFinished: 300
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+      - name: init-pageindex-db
+        # Same image as the postgres StatefulSet — bundles psql and is already on-node.
+        image: postgres:16-alpine
+        command:
+          - sh
+          - -c
+          - |
+            set -eu
+            export PGPASSWORD="$POSTGRES_PASSWORD"
+            PSQL="psql -v ON_ERROR_STOP=1 -h postgres.infra.svc.cluster.local -p 5432 -U $POSTGRES_USER -d $POSTGRES_DB"
+            # Role: create if missing, then sync password each run.
+            $PSQL <<SQL
+            DO \$\$
+            BEGIN
+              IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'pageindex') THEN
+                CREATE ROLE pageindex LOGIN PASSWORD '$PAGEINDEX_DB_PASSWORD';
+              ELSE
+                ALTER ROLE pageindex WITH LOGIN PASSWORD '$PAGEINDEX_DB_PASSWORD';
+              END IF;
+            END
+            \$\$;
+            SQL
+            # Database: CREATE DATABASE cannot run inside DO/transaction, so gate with a shell check.
+            EXISTS=$($PSQL -tAc "SELECT 1 FROM pg_database WHERE datname = 'pageindex'")
+            if [ "$EXISTS" != "1" ]; then
+              $PSQL -c "CREATE DATABASE pageindex OWNER pageindex"
+            fi
+        env:
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: infra-secrets
+              key: POSTGRES_USER
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: infra-secrets
+              key: POSTGRES_PASSWORD
+        - name: POSTGRES_DB
+          valueFrom:
+            secretKeyRef:
+              name: infra-secrets
+              key: POSTGRES_DB
+        - name: PAGEINDEX_DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: infra-secrets
+              key: PAGEINDEX_DB_PASSWORD

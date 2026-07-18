@@ -91,6 +91,14 @@ init-clickhouse:
 	$(KUBECTL) apply -f apps/infra/jobs/init-clickhouse-job.yaml -n $(INFRA_NS)
 	$(KUBECTL) wait --for=condition=complete job/init-clickhouse --timeout=120s -n $(INFRA_NS)
 
+# Provision the `pageindex` role + database inside the shared infra postgres
+# StatefulSet (one-time; idempotent). Requires infra-secrets.PAGEINDEX_DB_PASSWORD.
+.PHONY: init-pageindex-db
+init-pageindex-db:
+	$(KUBECTL) delete job init-pageindex-db -n $(INFRA_NS) --ignore-not-found
+	$(KUBECTL) apply -f apps/infra/jobs/init-pageindex-db-job.yaml -n $(INFRA_NS)
+	$(KUBECTL) wait --for=condition=complete job/init-pageindex-db --timeout=120s -n $(INFRA_NS)
+
 .PHONY: port-grafana-infra
 port-grafana-infra:
 	$(KUBECTL) port-forward -n $(INFRA_NS) svc/grafana 3000:3000
