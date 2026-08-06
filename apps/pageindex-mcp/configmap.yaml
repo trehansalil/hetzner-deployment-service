@@ -74,3 +74,36 @@ data:
   # both produce garbled text. Costs extra LLM calls; leave off unless needed.
   VLM_FALLBACK: "false"
   VLM_MODEL: "gpt-4.1"
+  # --- PDF conversion & Docling -----------------------------------------
+  PDF_CONVERTER: "docling"
+  FLAT_DOC_ROUTING: "true"
+  MAX_DOCLING_PAGES: "150"
+  DOCLING_FORCE_FULL_PAGE_OCR: "0"
+  # Remote Docling service (Scaleway). Leave DOCLING_SERVICE_URL empty to
+  # fall back to local conversion. Bearer token lives in the Secret.
+  DOCLING_SERVICE_URL: "https://wisedemo04b4dd27-docling-service.functions.fnc.nl-ams.scw.cloud/"
+  DOCLING_SERVICE_TIMEOUT_S: "1800"
+  # --- Recovery & fallback -----------------------------------------------
+  D7_FITZ_FALLBACK_ENABLED: "true"
+  D7_GARBLE_RECOVERY_ENABLED: "true"
+  LLM_TREE_MAX_RETRIES: "3"
+  # --- Auth & compliance -------------------------------------------------
+  MCP_ALLOW_UNAUTHENTICATED: "false"
+  PII_CORPUS: "false"
+  # --- Server / worker limits --------------------------------------------
+  LOG_LEVEL: "info"
+  MAX_UPLOAD_SIZE_MB: "100"
+  PAGEINDEX_WORKER_MAX_JOBS: "10"
+  # --- Registry tuning ----------------------------------------------------
+  REGISTRY_DELETE_TIMEOUT_S: "5.0"
+  PAGEINDEX_REGISTRY_QUERY_CONCURRENCY: "15"
+  PAGEINDEX_REGISTRY_RECONCILE_INTERVAL_S: "1200"
+  PAGEINDEX_REGISTRY_METRICS_SYNC_INTERVAL_S: "5"
+  # --- MinIO presign (public-facing URL for presigned download links) -----
+  # The internal MINIO_ENDPOINT (ClusterIP) is unreachable from outside the
+  # cluster. MINIO_PRESIGN_ENDPOINT is the host browsers/clients hit when
+  # following a presigned download URL. Path prefix must match the Traefik
+  # StripPrefix route configured in apps/infra/ingress.yaml.
+  MINIO_PRESIGN_ENDPOINT: "infra.saliltrehan.com"
+  MINIO_PRESIGN_PATH_PREFIX: "/minio"
+  MINIO_PRESIGN_SECURE: "true"
