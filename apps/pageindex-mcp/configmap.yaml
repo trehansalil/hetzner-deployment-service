@@ -88,7 +88,11 @@ data:
   # Bearer token lives in the Secret (DOCLING_SERVICE_BEARER_TOKEN).
   # NOTE (HR3): with PII_CORPUS=true the boot gate rejects this URL — it is not
   # on the ZDR allow-list; an in-cluster exemption is needed first.
-  DOCLING_SERVICE_URL: "http://docling-service:8080"
+  # 2026-09-25: pointed at the Mac mini over Tailscale (docling-service-mac.yaml;
+  # 292-page pocketbook in ~7 min vs 55+ min on docling-1). If the Mac is
+  # off, the converter chain's own fallback applies. Revert to
+  # http://docling-service:8080 (and scale docling-1 up) to switch back.
+  DOCLING_SERVICE_URL: "http://docling-service-mac:8090"
   # Just under the worker's 3600 s MAX_EFFECTIVE_TIMEOUT cap: a 292-page PDF
   # must convert and index inside arq's hard 3630 s JOB_TIMEOUT (not env).
   DOCLING_SERVICE_TIMEOUT_S: "3300"
