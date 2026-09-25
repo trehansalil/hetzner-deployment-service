@@ -1,5 +1,5 @@
 #cloud-config
-# First-boot user-data for the on-demand docling agent `docling-1` (cx23,
+# First-boot user-data for the on-demand docling agent `docling-1` (cx33,
 # hel1), used ONLY by `docling-node.sh bake`. `up` boots from the resulting
 # snapshot with no user-data: the agent config and the image are on its disk.
 #
@@ -30,8 +30,8 @@ write_files:
         - "workload=docling"
       node-taint:
         - "dedicated=docling:NoSchedule"
-      # cx23 has ~3.7Gi usable. Smaller reservations than portfolio's so the
-      # docling pod's 2Gi request fits in allocatable (~3.1Gi).
+      # Smaller reservations than portfolio's: sized first for a cx23 (~3.1Gi
+      # allocatable); on the cx33 they leave ~6.9Gi for the docling pod.
       kubelet-arg:
         - "system-reserved=memory=256Mi"
         - "kube-reserved=memory=256Mi"

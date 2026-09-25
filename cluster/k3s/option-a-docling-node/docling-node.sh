@@ -13,7 +13,7 @@
 # Flags: --dry-run prints every mutating command instead of running it.
 #        --yes answers the confirmation prompts (non-interactive runs).
 #
-# Costs (hel1, 2026-09-25): cx23 EUR 0.0088/h + primary IPv4 EUR 0.0008/h
+# Costs (hel1, 2026-09-25): cx33 EUR 0.0136/h + primary IPv4 EUR 0.0008/h
 # while docling-1 exists (powered off still bills; only `down` stops it).
 # The snapshot bills EUR 0.0143/GB/month while kept. Private networks and
 # firewalls are free.
@@ -23,7 +23,10 @@
 set -euo pipefail
 
 NODE=docling-1
-NODE_TYPE=cx23
+# cx33 (4 vCPU / 8 GB). cx23 (2 / 4 GB) was tried first: a 292-page PDF ran
+# ~25 s/page and the pod was evicted for node memory pressure (2026-09-25).
+# DOCLING_NODE_TYPE overrides it; the snapshot boots on any larger x86 type.
+NODE_TYPE=${DOCLING_NODE_TYPE:-cx33}
 LOCATION=hel1
 NET=k3s-net
 NET_RANGE=10.0.0.0/16
@@ -303,7 +306,7 @@ cmd_down() {
 cmd_status() {
   if exists_server "$NODE"; then
     hcloud server describe "$NODE" -o json | jq -r \
-      '"server: \(.name) \(.server_type.name) \(.status) created \(.created)  (EUR 0.0096/h while it exists)"'
+      '"server: \(.name) \(.server_type.name) \(.status) created \(.created)  (EUR 0.0144/h for cx33 while it exists)"'
   else
     echo "server: $NODE absent (not billing)"
   fi

@@ -90,7 +90,7 @@ data:
   # on the ZDR allow-list; an in-cluster exemption is needed first.
   DOCLING_SERVICE_URL: "http://docling-service:8080"
   # Just under the worker's 3600 s MAX_EFFECTIVE_TIMEOUT cap: a 292-page PDF
-  # needs ~30-40 min in 30-page chunks on the cx23 docling node.
+  # must convert and index inside arq's hard 3630 s JOB_TIMEOUT (not env).
   DOCLING_SERVICE_TIMEOUT_S: "3300"
   # --- Recovery & fallback -----------------------------------------------
   D7_FITZ_FALLBACK_ENABLED: "true"

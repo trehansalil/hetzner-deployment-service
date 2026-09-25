@@ -1,11 +1,11 @@
-# On-demand docling node (`docling-1`, cx23)
+# On-demand docling node (`docling-1`, cx33)
 
 **Status (2026-09-25):** set up and verified. Snapshot of `docling-service:8befd80` baked; `up` → HTTPS health, 401 without token, egress lock → `down` all checked. docling-1 is down (no server billing).
 Chosen over resizing portfolio (cx series out of stock for migration; a resize
 is a power-off). Scheduled cx33↔cx43 resizing is on hold — see
 [Option B rescale](../OPTION-B-RESCALE.md).
 
-`docling-1` is a second Hetzner Cloud server (cx23: 2 vCPU / 4 GB, hel1). It
+`docling-1` is a second Hetzner Cloud server (cx33: 4 vCPU / 8 GB, hel1; `DOCLING_NODE_TYPE` overrides). It
 joins the portfolio k3s cluster as an agent over a private network, runs only
 docling-service, and exists only while you need it. `docling-node.sh` drives
 everything; every mutating step accepts `--dry-run`.
@@ -14,7 +14,7 @@ everything; every mutating step accepts `--dry-run`.
                  internet
                     │  docling.saliltrehan.com (A → 89.167.109.165, fixed)
         ┌───────────▼────────────┐   k3s-net 10.0.0.0/16   ┌──────────────────┐
-        │ portfolio (cx33)       │◄───────────────────────►│ docling-1 (cx23) │
+        │ portfolio (cx33)       │◄───────────────────────►│ docling-1 (cx33) │
         │ traefik, worker, infra │  flannel VXLAN, kubelet │ docling-service  │
         │ docling-service-local  │                         │ (on demand)      │
         │ (replicas 0 unless cx43)                         └──────────────────┘
@@ -25,7 +25,7 @@ everything; every mutating step accepts `--dry-run`.
 
 | Item | When billed | Price |
 |---|---|---|
-| `docling-1` cx23 + primary IPv4 | while the server **exists** (off still bills) | €0.0088 + €0.0008 = **€0.0096/h**, cap €5.99/mo |
+| `docling-1` cx33 + primary IPv4 | while the server **exists** (off still bills) | €0.0136 + €0.0008 = **€0.0144/h** |
 | docling snapshot | while kept | €0.0143/GB/month (~8–12 GB → ~€0.15/mo) |
 | private network, firewalls, DNS record | — | free |
 
