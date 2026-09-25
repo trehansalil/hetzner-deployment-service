@@ -24,8 +24,11 @@ data:
   # pageindex library and overrides these to "azure/<deployment>" in
   # worker-deployment.yaml — litellm needs the provider prefix to route to Azure.
   PAGEINDEX_MODEL: "gpt-4.1"
-  PAGEINDEX_FILTER_MODEL: "gpt-4.1"
-  PAGEINDEX_SEARCH_MODEL: "gpt-4.1"
+  # Per-stage models, as the engine was tuned: gpt-4.1 builds trees; the
+  # document pre-filter and the per-document tree search are one call each on
+  # the query path, so they run on the small, fast tiers.
+  PAGEINDEX_FILTER_MODEL: "gpt-5.4-mini"
+  PAGEINDEX_SEARCH_MODEL: "gpt-5.4-nano"
   PAGEINDEX_SEARCH_CONCURRENCY: "3"
   # Azure OpenAI routing for litellm (worker side). API version is non-sensitive.
   # NOTE (LLM-01): configure_litellm() derives AZURE_API_BASE from OPENAI_BASE_URL

@@ -39,9 +39,9 @@ spec:
             - name: PAGEINDEX_MODEL
               value: "azure/gpt-4.1"
             - name: PAGEINDEX_FILTER_MODEL
-              value: "azure/gpt-4.1"
+              value: "azure/gpt-5.4-mini"
             - name: PAGEINDEX_SEARCH_MODEL
-              value: "azure/gpt-4.1"
+              value: "azure/gpt-5.4-nano"
           envFrom:
             - configMapRef:
                 name: pageindex-mcp-config
