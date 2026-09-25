@@ -1,0 +1,41 @@
+# k3s config drop-in: kubelet memory reservations + memory eviction.
+#
+# NOT APPLIED. Install target on the host:
+#   /etc/rancher/k3s/config.yaml.d/10-kubelet-memory.yaml
+# Runbook: cluster/k3s/KUBELET-MEMORY-RUNBOOK.md (read it before installing —
+# with the RFC-050 docling-service branch deployed on the current 7.6 GiB node,
+# these reservations leave the docling-service pod Pending).
+#
+# Why: the live kubelet config (/var/lib/rancher/k3s/agent/etc/kubelet.conf.d/
+# 00-k3s-defaults.conf) has evictionHard with only imagefs/nodefs and no
+# system/kube reservations, so allocatable == capacity (7937228Ki) and memory
+# exhaustion goes straight to the kernel OOM killer, which prefers pods
+# (oom_score_adj ~1000) — that is how traefik and postgres died on 2026-09-17.
+#
+# Precedence: kubelet command-line flags (what `kubelet-arg` produces) override
+# the k3s-generated config file, so these win over 00-k3s-defaults.conf.
+#
+# `kubelet-arg+` (with the plus) APPENDS to any kubelet-arg list set in
+# config.yaml or an earlier drop-in instead of replacing it. Every later file
+# that sets kubelet-arg must also use `kubelet-arg+`.
+kubelet-arg+:
+  # Measured 2026-09-25 (PSS, see runbook): k3s.service = 1042 MiB
+  # (k3s server incl. apiserver/controller/scheduler/kine/kubelet 827 MiB,
+  # containerd 104 MiB, shims). 512Mi would under-reserve by ~half, so 1Gi.
+  - "kube-reserved=memory=1Gi"
+  # Measured: other system.slice services ~110 MiB PSS (journald, multipathd,
+  # snapd, synchub, cron). 1Gi leaves headroom for sshd/apt/journald spikes.
+  # It does NOT cover the interactive user.slice (Claude sessions, happy,
+  # MCP servers: ~2.0 GiB resident + ~3.6 GiB swapped) — see runbook §4.
+  - "system-reserved=memory=1Gi"
+  # A flag REPLACES the whole evictionHard map, so the two existing disk
+  # thresholds are repeated here EXACTLY as in 00-k3s-defaults.conf
+  # (imagefs.available: 5%, nodefs.available: 5%). Dropping them would
+  # silently disable disk-pressure eviction.
+  - "eviction-hard=memory.available<300Mi,nodefs.available<5%,imagefs.available<5%"
+  # Soft threshold: start graceful eviction of the pods most over their
+  # requests once host-wide available memory stays under 600Mi for 90s.
+  - "eviction-soft=memory.available<600Mi"
+  - "eviction-soft-grace-period=memory.available=1m30s"
+  # Cap the terminationGracePeriod honoured during a SOFT eviction.
+  - "eviction-max-pod-grace-period=30"

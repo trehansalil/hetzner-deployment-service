@@ -302,10 +302,17 @@ PAGEINDEX_IMAGE_TAG ?= latest
 .PHONY: deploy-pageindex
 deploy-pageindex:
 	$(KUBECTL) apply -f apps/pageindex-mcp/namespace.yaml
+	# RFC-050: docling-service Ready before the worker picks up DOCLING_SERVICE_URL.
+	$(KUBECTL) apply -f apps/pageindex-mcp/service.yaml -n $(PAGEINDEX_NS)
+	$(KUBECTL) apply -f apps/pageindex-mcp/docling-service-deployment.yaml -n $(PAGEINDEX_NS)
+	$(KUBECTL) apply -f apps/pageindex-mcp/docling-service-public.yaml -n $(PAGEINDEX_NS)
+	# docling-service is pinned to the on-demand node; skip the wait while it is down.
+	if $(KUBECTL) get nodes -l workload=docling --no-headers 2>/dev/null | grep -qw Ready; then \
+	  $(KUBECTL) rollout status deployment/docling-service -n $(PAGEINDEX_NS) --timeout=600s; \
+	else echo "docling node down: skipping docling-service rollout wait"; fi
 	$(KUBECTL) apply -f apps/pageindex-mcp/configmap.yaml -n $(PAGEINDEX_NS)
 	$(KUBECTL) apply -f apps/pageindex-mcp/deployment.yaml -n $(PAGEINDEX_NS)
 	$(KUBECTL) apply -f apps/pageindex-mcp/worker-deployment.yaml -n $(PAGEINDEX_NS)
-	$(KUBECTL) apply -f apps/pageindex-mcp/service.yaml -n $(PAGEINDEX_NS)
 	$(KUBECTL) apply -f apps/pageindex-mcp/certificate.yaml -n $(PAGEINDEX_NS)
 	$(KUBECTL) apply -f apps/pageindex-mcp/ingress.yaml -n $(PAGEINDEX_NS)
 	$(KUBECTL) delete ingress pageindex-mcp -n $(PAGEINDEX_NS) --ignore-not-found

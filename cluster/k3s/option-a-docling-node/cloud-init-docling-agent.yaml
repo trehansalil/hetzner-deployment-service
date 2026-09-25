@@ -1,0 +1,76 @@
+#cloud-config
+# First-boot user-data for the on-demand docling agent `docling-1` (cx23,
+# hel1), used ONLY by `docling-node.sh bake`. `up` boots from the resulting
+# snapshot with no user-data: the agent config and the image are on its disk.
+#
+# docling-node.sh renders a 0600 copy outside the repo, replacing:
+#   __K3S_NODE_TOKEN__  /var/lib/rancher/k3s/server/node-token on portfolio
+#   __PAGEINDEX_SHA__   the pageindex commit whose docling-service image to build
+# Never commit the rendered copy. Hetzner user-data stays readable from the
+# node's metadata service (169.254.169.254); the docling pods cannot reach it
+# (NetworkPolicy in apps/pageindex-mcp/docling-service-public.yaml).
+
+package_update: true
+packages:
+  - curl
+  - git
+  - docker.io
+  - docker-buildx
+
+write_files:
+  - path: /etc/rancher/k3s/config.yaml
+    permissions: "0600"
+    content: |
+      server: "https://10.0.0.2:6443"
+      token: "__K3S_NODE_TOKEN__"
+      # Fixed: docling-node.sh always attaches this server at 10.0.0.3, so the
+      # snapshot's config stays valid on every `up`.
+      node-ip: "10.0.0.3"
+      node-label:
+        - "workload=docling"
+      node-taint:
+        - "dedicated=docling:NoSchedule"
+      # cx23 has ~3.7Gi usable. Smaller reservations than portfolio's so the
+      # docling pod's 2Gi request fits in allocatable (~3.1Gi).
+      kubelet-arg:
+        - "system-reserved=memory=256Mi"
+        - "kube-reserved=memory=256Mi"
+        - "eviction-hard=memory.available<200Mi,nodefs.available<5%,imagefs.available<5%"
+  - path: /usr/local/sbin/docling-bake.sh
+    permissions: "0700"
+    content: |
+      #!/bin/sh
+      set -eu
+      SHA="__PAGEINDEX_SHA__"
+      TAG="docling-service:$(echo "$SHA" | cut -c1-7)"
+      # Wait for the private NIC (attached before the first power-on).
+      i=0
+      while ! ip -o -4 addr show | grep -q ' 10\.0\.0\.3/'; do
+        i=$((i+1)); [ "$i" -gt 60 ] && { echo "no 10.0.0.3 after 5 min" >&2; exit 1; }
+        sleep 5
+      done
+      IFACE=$(ip -o -4 addr show | awk '$4 ~ /^10\.0\.0\.3\// {print $2; exit}')
+      echo "flannel-iface: \"$IFACE\"" >> /etc/rancher/k3s/config.yaml
+      curl -sfL https://get.k3s.io | \
+        INSTALL_K3S_VERSION="v1.34.5+k3s1" INSTALL_K3S_EXEC="agent" sh -
+      # Build the image here from the public repo (no credentials) and hand it
+      # to the agent's containerd, so no registry pull secret is needed.
+      git clone --quiet https://github.com/trehansalil/pageindex /opt/src
+      git -C /opt/src checkout --quiet "$SHA"
+      DOCKER_BUILDKIT=1 docker build \
+        --build-arg BUILD_SHA="$SHA" \
+        --build-arg BUILD_TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        -f /opt/src/services/docling-service/Dockerfile -t "$TAG" /opt/src
+      docker save "$TAG" | k3s ctr -n k8s.io images import -
+      # Docker was only the build tool: drop it and its layers before the
+      # snapshot, which is billed per GB.
+      docker system prune -af
+      systemctl disable --now docker.socket docker.service
+      apt-get purge -y docker.io docker-buildx
+      rm -rf /var/lib/docker /opt/src
+      apt-get clean
+      echo "$TAG" > /var/lib/docling-bake.done
+
+runcmd:
+  # No swap on the cx image; pods run NoSwap — keep it that way.
+  - [ sh, -c, "/usr/local/sbin/docling-bake.sh > /var/log/docling-bake.log 2>&1" ]
