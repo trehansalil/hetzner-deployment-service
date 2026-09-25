@@ -120,11 +120,13 @@ it, so run it while docling-1 is up (or once the GHCR image exists).
 
 ## Things to know
 
-- **The worker is not switched.** The live `pageindex-mcp-config` is untouched,
-  so the G1 baseline arm is unaffected. When the worker's `DOCLING_SERVICE_URL`
-  does point at `http://docling-service:8080`, conversions fail while no copy
-  is running. Before that merge, decide: keep docling-1 up during ingestion, or
-  add a worker fallback to local conversion when the service is unreachable.
+- **The worker is switched (2026-09-25).** The live `pageindex-mcp-config` has
+  `DOCLING_SERVICE_URL=http://docling-service:8080` (and the default of 2
+  worker jobs). **Conversions fail while no copy is running**: run
+  `docling-node.sh up` before ingesting, `down` after. A worker fallback to
+  local conversion when the service is unreachable is not built.
+- **Host-side tooling** (`make env DOCLING=remote` in pageindex) uses
+  `https://docling.saliltrehan.com` from `env/remote.env`, with the same token.
 - **G1 comparison.** The post arm then runs on extra hardware (docling-1). Say
   so in the G1 report: the result measures "offload to a dedicated node".
 - **Egress lock.** docling pods may reach DNS, public IPs and traefik only —
