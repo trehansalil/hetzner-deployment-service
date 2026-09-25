@@ -111,7 +111,14 @@ wait_for() {  # wait_for SECONDS DESCRIPTION CMD...
 }
 
 node_ready() { kubectl get node "$NODE" --no-headers 2>/dev/null | grep -qw Ready; }
-ssh_node() { ssh -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 "root@$NODE_PRIV_IP" "$@"; }
+# Host keys are pinned per run, in this run's own known_hosts: every
+# docling-1 is a new instance and cloud-init regenerates its host keys, so a
+# key pinned in ~/.ssh/known_hosts would fail the next bake/up.
+ssh_node() {
+  ssh -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new \
+    -o UserKnownHostsFile="$TMP/known_hosts" -o LogLevel=ERROR \
+    -o ConnectTimeout=5 "root@$NODE_PRIV_IP" "$@"
+}
 
 rules_portfolio() {
   # Public inbound only. Private-network traffic is not filtered by Hetzner
@@ -209,6 +216,23 @@ cmd_bake() {
     --user-data-from-file "$tmp/user-data.yaml" --start-after-create=false
   run hcloud server attach-to-network "$NODE" --network "$NET" --ip "$NODE_PRIV_IP"
   run hcloud server poweron "$NODE"
+
+  # The build downloads the Docling models from the HF Hub; a token avoids
+  # anonymous rate limits. It goes over SSH into /run (tmpfs), not into
+  # user-data, so it is never in the metadata service, /var/lib/cloud, or
+  # the snapshot. The bake waits up to 10 min for it, then builds anonymously.
+  local hf
+  hf=$(kubectl -n "$NS" get secret pageindex-mcp-secrets \
+         -o jsonpath='{.data.HF_TOKEN}' 2>/dev/null | base64 -d 2>/dev/null || true)
+  wait_for 300 "SSH on $NODE" ssh_node true
+  if [ -n "$hf" ]; then
+    log "Hand HF_TOKEN to $NODE (/run/hf_token)"
+    [ "$DRY_RUN" = 1 ] || printf '%s' "$hf" | ssh_node 'umask 077; cat > /run/hf_token'
+  else
+    log "no HF_TOKEN in pageindex-mcp-secrets; the model download runs anonymously"
+    [ "$DRY_RUN" = 1 ] || ssh_node 'touch /run/hf_token'
+  fi
+  unset hf
 
   log "Build runs on $NODE (~15-30 min); log: ssh -i $SSH_KEY root@$NODE_PRIV_IP tail -f /var/log/docling-bake.log"
   wait_for 2700 "image build + import on $NODE" ssh_node test -f /var/lib/docling-bake.done

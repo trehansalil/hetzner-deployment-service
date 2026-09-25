@@ -57,7 +57,15 @@ write_files:
       # to the agent's containerd, so no registry pull secret is needed.
       git clone --quiet https://github.com/trehansalil/pageindex /opt/src
       git -C /opt/src checkout --quiet "$SHA"
-      DOCKER_BUILDKIT=1 docker build \
+      # docling-node.sh copies HF_TOKEN to /run/hf_token (tmpfs) over SSH; the
+      # Dockerfile reads it as a BuildKit secret, so it stays out of the image
+      # layers. Empty or absent after 10 min: download the models anonymously.
+      i=0
+      while [ ! -e /run/hf_token ] && [ "$i" -lt 120 ]; do i=$((i+1)); sleep 5; done
+      SECRET=""
+      [ -s /run/hf_token ] && SECRET="--secret id=hf_token,src=/run/hf_token"
+      # shellcheck disable=SC2086
+      DOCKER_BUILDKIT=1 docker build $SECRET \
         --build-arg BUILD_SHA="$SHA" \
         --build-arg BUILD_TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         -f /opt/src/services/docling-service/Dockerfile -t "$TAG" /opt/src
@@ -67,7 +75,7 @@ write_files:
       docker system prune -af
       systemctl disable --now docker.socket docker.service
       apt-get purge -y docker.io docker-buildx
-      rm -rf /var/lib/docker /opt/src
+      rm -rf /var/lib/docker /opt/src /run/hf_token
       apt-get clean
       echo "$TAG" > /var/lib/docling-bake.done
 

@@ -85,7 +85,14 @@ Creates docling-1 from ubuntu-24.04, builds `services/docling-service/Dockerfile
 at that commit **on the node** (~15–30 min on 2 vCPU), imports the image into
 the agent's containerd as `docling-service:<sha7>`, points both Deployments at
 it, snapshots the server (label `docling-node=snapshot`, older one deleted) and
-deletes the server. No registry or pull secret is involved. Once
+deletes the server. No registry or pull secret is involved.
+
+The model download uses `HF_TOKEN` from `pageindex-mcp-secrets` when it is
+set (anonymous otherwise, which is slower and rate-limited). `bake` hands it to
+the node over SSH on the private network into `/run/hf_token` (tmpfs), and the
+Dockerfile reads it as a BuildKit secret: it is not in user-data, the image
+layers or the snapshot. The running service never needs it (models are baked
+in, runtime is offline). Once
 `build-push-docling-service.yml` publishes to GHCR from master, the deploy
 workflow switches the Deployments to the GHCR tag instead.
 
