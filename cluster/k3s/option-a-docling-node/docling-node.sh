@@ -271,7 +271,16 @@ cmd_up() {
   wait_for 300 "$NODE Ready" node_ready
   run kubectl uncordon "$NODE"
   run kubectl -n "$NS" rollout status deployment/docling-service --timeout=600s
-  [ "$DRY_RUN" = 1 ] || curl -fsS "https://$RECORD.$ZONE/health" && echo
+  # traefik picks up the new endpoint a few seconds after the rollout: retry
+  # the 503 for up to a minute, and warn rather than fail (the node is up).
+  if [ "$DRY_RUN" != 1 ]; then
+    local t=0
+    until curl -fsS -m 10 "https://$RECORD.$ZONE/health"; do
+      t=$((t+5)); [ "$t" -ge 60 ] && { log "WARN: https://$RECORD.$ZONE/health not answering yet"; break; }
+      sleep 5
+    done
+    echo
+  fi
   log "up. Remember '$0 down' when done: $NODE bills hourly while it exists."
 }
 

@@ -1,6 +1,6 @@
 # On-demand docling node (`docling-1`, cx23)
 
-**Status (2026-09-25):** prepared, not executed. No cloud resources exist yet.
+**Status (2026-09-25):** set up and verified. Snapshot of `docling-service:8befd80` baked; `up` → HTTPS health, 401 without token, egress lock → `down` all checked. docling-1 is down (no server billing).
 Chosen over resizing portfolio (cx series out of stock for migration; a resize
 is a power-off). Scheduled cx33↔cx43 resizing is on hold — see
 [Option B rescale](../OPTION-B-RESCALE.md).
