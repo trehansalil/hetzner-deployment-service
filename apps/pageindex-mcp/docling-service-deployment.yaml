@@ -47,7 +47,7 @@ spec:
           # Built on the node by `docling-node.sh bake` and imported into its
           # containerd (no registry pull). After the image is published to
           # GHCR (master), the deploy workflow `kubectl set image`s this.
-          image: docling-service:8befd80
+          image: docling-service:38835af
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
@@ -66,21 +66,11 @@ spec:
               value: "120"
             - name: DOCLING_MAX_CONCURRENT
               value: "1"
-            # Pages per Docling chunk. The default 150 OOM-killed the pod at
-            # the 3Gi limit on a 292-page PDF (2026-09-25): a chunk's page
-            # images and layout results sit on top of ~1.7Gi of models.
-            - name: MAX_DOCLING_PAGES
-              value: "30"
-            # Native math-library thread caps — same values and rationale as
-            # pageindex-mcp-config: unbounded pools spawn one thread per host
-            # vCPU and inflate per-thread scratch arenas (memory). Raise
-            # DOCLING_NUM_THREADS (and the CPU limit) only after measuring RSS.
-            # 4 = all cx33 vCPUs (the CPU limit is 4000m). On a cx23 at 2
-            # threads a 292-page PDF ran ~25 s/page (2026-09-25).
-            - name: DOCLING_NUM_THREADS
-              value: "4"
-            - name: OMP_NUM_THREADS
-              value: "4"
+            # Docling threads, parallel chunk processes and chunk size are
+            # NOT set here: the service derives them per request from this
+            # container's cgroup CPU and memory limits
+            # (pageindex_mcp/converters/docling_resources.py). These caps keep
+            # the other native pools from spawning a thread per host vCPU.
             - name: MKL_NUM_THREADS
               value: "1"
             - name: OPENBLAS_NUM_THREADS
@@ -113,18 +103,17 @@ spec:
             periodSeconds: 30
             timeoutSeconds: 10
             failureThreshold: 5
+          # Placeholder for the cx33: `docling-node.sh up` resets requests and
+          # limits to the node's allocatable (minus 256Mi, above the eviction
+          # floor) on every up, whatever server type it got. The service sizes
+          # itself from these limits.
           resources:
             requests:
-              cpu: "1000m"
-              # ~1.7Gi of models, plus one 30-page chunk: peaked at 2.67Gi with
-              # 2 threads on the cx23, where the node's own memory ran out
-              # first and the pod was evicted. cx33 allocatable is ~6.9Gi; the
-              # 6Gi limit leaves the kubelet's eviction floor untouched, so a
-              # runaway conversion is OOM-killed in its cgroup instead.
-              memory: "3Gi"
+              cpu: "4000m"
+              memory: "6783Mi"
             limits:
               cpu: "4000m"
-              memory: "6Gi"
+              memory: "6783Mi"
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -162,7 +151,7 @@ spec:
         - name: ghcr-credentials
       containers:
         - name: docling-service
-          image: docling-service:8befd80
+          image: docling-service:38835af
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
@@ -181,21 +170,11 @@ spec:
               value: "120"
             - name: DOCLING_MAX_CONCURRENT
               value: "1"
-            # Pages per Docling chunk. The default 150 OOM-killed the pod at
-            # the 3Gi limit on a 292-page PDF (2026-09-25): a chunk's page
-            # images and layout results sit on top of ~1.7Gi of models.
-            - name: MAX_DOCLING_PAGES
-              value: "30"
-            # Native math-library thread caps — same values and rationale as
-            # pageindex-mcp-config: unbounded pools spawn one thread per host
-            # vCPU and inflate per-thread scratch arenas (memory). Raise
-            # DOCLING_NUM_THREADS (and the CPU limit) only after measuring RSS.
-            # 2 = both cx23 vCPUs (the CPU limit is 2000m). At 1 a 292-page
-            # PDF ran ~12 s/page, past the worker's timeout (2026-09-25).
-            - name: DOCLING_NUM_THREADS
-              value: "2"
-            - name: OMP_NUM_THREADS
-              value: "2"
+            # Docling threads, parallel chunk processes and chunk size are
+            # NOT set here: the service derives them per request from this
+            # container's cgroup CPU and memory limits
+            # (pageindex_mcp/converters/docling_resources.py). These caps keep
+            # the other native pools from spawning a thread per host vCPU.
             - name: MKL_NUM_THREADS
               value: "1"
             - name: OPENBLAS_NUM_THREADS

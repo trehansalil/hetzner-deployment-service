@@ -259,6 +259,28 @@ cmd_bake() {
   log "bake done: '$0 up' boots from the new snapshot"
 }
 
+# Give the docling pod the whole node, whatever type `up` got: the service
+# derives its threads, parallel chunk processes and chunk size from its own
+# cgroup limits, so these limits are the only sizing input. Only the eviction
+# margin is held back, so a runaway conversion is OOM-killed in its cgroup
+# before the kubelet evicts the pod for node memory pressure.
+size_pod_to_node() {
+  local cpu mem cpu_m mem_mi
+  cpu=$(kubectl get node "$NODE" -o jsonpath='{.status.allocatable.cpu}')
+  mem=$(kubectl get node "$NODE" -o jsonpath='{.status.allocatable.memory}')
+  case "$cpu" in *m) cpu_m=${cpu%m} ;; *) cpu_m=$((cpu * 1000)) ;; esac
+  case "$mem" in
+    *Ki) mem_mi=$((${mem%Ki} / 1024)) ;;
+    *Mi) mem_mi=${mem%Mi} ;;
+    *Gi) mem_mi=$((${mem%Gi} * 1024)) ;;
+    *) mem_mi=$((mem / 1048576)) ;;
+  esac
+  mem_mi=$((mem_mi - 256))
+  log "Size docling-service to $NODE: cpu ${cpu_m}m, memory ${mem_mi}Mi (allocatable $cpu / $mem)"
+  run kubectl -n "$NS" set resources deployment/docling-service -c docling-service \
+    --requests="cpu=${cpu_m}m,memory=${mem_mi}Mi" --limits="cpu=${cpu_m}m,memory=${mem_mi}Mi"
+}
+
 cmd_up() {
   exists_server "$NODE" && { log "$NODE already exists"; cmd_status; return; }
   local snap; snap=$(newest_snapshot)
@@ -272,6 +294,7 @@ cmd_up() {
   run hcloud server attach-to-network "$NODE" --network "$NET" --ip "$NODE_PRIV_IP"
   run hcloud server poweron "$NODE"
   wait_for 300 "$NODE Ready" node_ready
+  size_pod_to_node
   run kubectl uncordon "$NODE"
   run kubectl -n "$NS" rollout status deployment/docling-service --timeout=600s
   # traefik picks up the new endpoint a few seconds after the rollout: retry

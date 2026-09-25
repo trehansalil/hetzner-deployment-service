@@ -1,6 +1,6 @@
 # On-demand docling node (`docling-1`, cx33)
 
-**Status (2026-09-25):** set up and verified. Snapshot of `docling-service:8befd80` baked; `up` → HTTPS health, 401 without token, egress lock → `down` all checked. docling-1 is down (no server billing).
+**Status (2026-09-25):** set up and verified. Snapshot of `docling-service:38835af` baked (auto-sized parallel chunks); `up` → HTTPS health, 401 without token, egress lock → `down` all checked. docling-1 is down (no server billing).
 Chosen over resizing portfolio (cx series out of stock for migration; a resize
 is a power-off). Scheduled cx33↔cx43 resizing is on hold — see
 [Option B rescale](../OPTION-B-RESCALE.md).
@@ -119,6 +119,17 @@ The service refuses to start without that token.
 it, so run it while docling-1 is up (or once the GHCR image exists).
 
 ## Things to know
+
+- **Sizing is automatic.** `up` gives the docling pod the node's allocatable
+  CPU and memory (minus 256Mi), whatever server type it got. The service then
+  reads its cgroup limits and, per request, picks the number of parallel chunk
+  processes, threads per process and chunk size
+  (`pageindex_mcp/converters/docling_resources.py`). There are no thread or
+  page env values to tune. On a cx33 a large PDF runs as 4 processes x 1
+  thread, 10-page chunks: TableFormer (~99% of the time on table-dense
+  pages) keeps one process at ~1.7 cores whatever its thread count, so 4 x 1
+  was 3x faster than 1 x 4 on the same pages. `DOCLING_NODE_TYPE` with more
+  vCPUs and RAM scales it without other changes.
 
 - **The worker is switched (2026-09-25).** The live `pageindex-mcp-config` has
   `DOCLING_SERVICE_URL=http://docling-service:8080` (and the default of 2
