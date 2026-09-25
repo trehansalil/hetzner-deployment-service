@@ -73,7 +73,7 @@ kubectl apply -n pageindex-mcp -f apps/pageindex-mcp/service.yaml \
   -f apps/pageindex-mcp/docling-service-public.yaml
 ```
 
-`docling-service` stays Pending until docling-1 exists; that is expected.
+`docling-service` sits at 0 replicas until `up` sizes it to docling-1 and scales it to 1; `down` scales it back to 0.
 
 ## 2. Bake the image (once per docling-service version)
 

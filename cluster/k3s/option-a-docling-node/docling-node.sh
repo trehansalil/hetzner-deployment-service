@@ -295,6 +295,7 @@ cmd_up() {
   run hcloud server poweron "$NODE"
   wait_for 300 "$NODE Ready" node_ready
   size_pod_to_node
+  run kubectl -n "$NS" scale deployment/docling-service --replicas=1
   run kubectl uncordon "$NODE"
   run kubectl -n "$NS" rollout status deployment/docling-service --timeout=600s
   # traefik picks up the new endpoint a few seconds after the rollout: retry
@@ -311,6 +312,8 @@ cmd_up() {
 }
 
 cmd_down() {
+  # 0 at rest, so no Pending pod holds the node's full request meanwhile.
+  run kubectl -n "$NS" scale deployment/docling-service --replicas=0
   if node_ready || kubectl get node "$NODE" >/dev/null 2>&1; then
     run kubectl drain "$NODE" --ignore-daemonsets --delete-emptydir-data --timeout=120s || true
     run kubectl delete node "$NODE"

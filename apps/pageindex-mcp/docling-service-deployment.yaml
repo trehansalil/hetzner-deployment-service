@@ -12,13 +12,15 @@ spec:
   # Two Deployments share the `app: docling-service` label, so the one
   # docling-service Service balances over whichever copies are running:
   #   docling-service        pinned to the on-demand cx33 node `docling-1`
-  #                          (workload=docling). Pending while that node is
-  #                          down — expected, see docling-node.sh up/down.
+  #                          (workload=docling). Scaled to 0 while that node
+  #                          is down; docling-node.sh up/down scale it 1/0.
   #   docling-service-local  on portfolio, replicas 0 unless portfolio has the
   #                          RAM for it (cx43); `docling-node.sh local on|off`.
   # The service admits one conversion at a time (DOCLING_MAX_CONCURRENT=1)
   # and queues the rest, so each pod peaks at one ~2Gi conversion.
-  replicas: 1
+  # 0 at rest: docling-1 is on-demand. `docling-node.sh up` scales to 1
+  # after sizing the pod to the node; `down` scales back to 0.
+  replicas: 0
   # Recreate, not RollingUpdate: docling-1 cannot hold two Docling pods at
   # their limit during a rollout.
   strategy:
@@ -103,17 +105,18 @@ spec:
             periodSeconds: 30
             timeoutSeconds: 10
             failureThreshold: 5
-          # Placeholder for the cx33: `docling-node.sh up` resets requests and
-          # limits to the node's allocatable (minus 256Mi, above the eviction
-          # floor) on every up, whatever server type it got. The service sizes
+          # Minimal placeholder while docling-1 is down (replicas 0).
+          # `docling-node.sh up` resets requests and limits to the node's
+          # allocatable (minus 256Mi, above the eviction floor) before it
+          # scales to 1, whatever server type it got. The service sizes
           # itself from these limits.
           resources:
             requests:
-              cpu: "4000m"
-              memory: "6783Mi"
+              cpu: "500m"
+              memory: "2560Mi"
             limits:
-              cpu: "4000m"
-              memory: "6783Mi"
+              cpu: "2000m"
+              memory: "3584Mi"
 ---
 apiVersion: apps/v1
 kind: Deployment
