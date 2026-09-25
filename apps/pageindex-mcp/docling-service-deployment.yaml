@@ -75,10 +75,12 @@ spec:
             # pageindex-mcp-config: unbounded pools spawn one thread per host
             # vCPU and inflate per-thread scratch arenas (memory). Raise
             # DOCLING_NUM_THREADS (and the CPU limit) only after measuring RSS.
+            # 2 = both cx23 vCPUs (the CPU limit is 2000m). At 1 a 292-page
+            # PDF ran ~12 s/page, past the worker's timeout (2026-09-25).
             - name: DOCLING_NUM_THREADS
-              value: "1"
+              value: "2"
             - name: OMP_NUM_THREADS
-              value: "1"
+              value: "2"
             - name: MKL_NUM_THREADS
               value: "1"
             - name: OPENBLAS_NUM_THREADS
@@ -185,10 +187,12 @@ spec:
             # pageindex-mcp-config: unbounded pools spawn one thread per host
             # vCPU and inflate per-thread scratch arenas (memory). Raise
             # DOCLING_NUM_THREADS (and the CPU limit) only after measuring RSS.
+            # 2 = both cx23 vCPUs (the CPU limit is 2000m). At 1 a 292-page
+            # PDF ran ~12 s/page, past the worker's timeout (2026-09-25).
             - name: DOCLING_NUM_THREADS
-              value: "1"
+              value: "2"
             - name: OMP_NUM_THREADS
-              value: "1"
+              value: "2"
             - name: MKL_NUM_THREADS
               value: "1"
             - name: OPENBLAS_NUM_THREADS
