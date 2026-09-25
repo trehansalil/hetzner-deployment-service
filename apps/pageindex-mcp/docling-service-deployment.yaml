@@ -47,7 +47,7 @@ spec:
           # Built on the node by `docling-node.sh bake` and imported into its
           # containerd (no registry pull). After the image is published to
           # GHCR (master), the deploy workflow `kubectl set image`s this.
-          image: docling-service:28cc5a5
+          image: docling-service:8befd80
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
@@ -157,7 +157,7 @@ spec:
         - name: ghcr-credentials
       containers:
         - name: docling-service
-          image: docling-service:28cc5a5
+          image: docling-service:8befd80
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
