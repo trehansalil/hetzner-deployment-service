@@ -66,6 +66,11 @@ spec:
               value: "120"
             - name: DOCLING_MAX_CONCURRENT
               value: "1"
+            # Pages per Docling chunk. The default 150 OOM-killed the pod at
+            # the 3Gi limit on a 292-page PDF (2026-09-25): a chunk's page
+            # images and layout results sit on top of ~1.7Gi of models.
+            - name: MAX_DOCLING_PAGES
+              value: "30"
             # Native math-library thread caps — same values and rationale as
             # pageindex-mcp-config: unbounded pools spawn one thread per host
             # vCPU and inflate per-thread scratch arenas (memory). Raise
@@ -171,6 +176,11 @@ spec:
               value: "120"
             - name: DOCLING_MAX_CONCURRENT
               value: "1"
+            # Pages per Docling chunk. The default 150 OOM-killed the pod at
+            # the 3Gi limit on a 292-page PDF (2026-09-25): a chunk's page
+            # images and layout results sit on top of ~1.7Gi of models.
+            - name: MAX_DOCLING_PAGES
+              value: "30"
             # Native math-library thread caps — same values and rationale as
             # pageindex-mcp-config: unbounded pools spawn one thread per host
             # vCPU and inflate per-thread scratch arenas (memory). Raise
