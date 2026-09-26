@@ -1,0 +1,27 @@
+# loki-tailscale: a NodePort so the Mac's Grafana Alloy can push logs to Loki
+# over Tailscale, at http://100.120.146.20:31100/loki/api/v1/push
+# (RFC-052 D2, task 1.9).
+#
+# OPERATOR STEP. This file is deliberately NOT in apps/infra/, because
+# deploy.yml applies that directory on every push. Loki has no auth, so this
+# Service may exist only while the host guard from apply-firewall.sh limits
+# the port to tailscale0.
+# Order: apply-firewall.sh, then apply-firewall.sh --check, then
+#   kubectl apply -f cluster/k3s/loki-tailscale/loki-tailscale-service.yaml
+# See README.md in this directory.
+apiVersion: v1
+kind: Service
+metadata:
+  name: loki-tailscale
+  namespace: infra
+spec:
+  type: NodePort
+  selector:
+    app: loki
+  ports:
+    - name: http
+      protocol: TCP
+      port: 3100
+      targetPort: 3100
+      # Must equal LOKI_NODEPORT in apply-firewall.sh (default 31100).
+      nodePort: 31100
