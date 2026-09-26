@@ -134,6 +134,15 @@ jobs:
           kubectl apply -f apps/infra/service.yaml -n infra
           kubectl apply -f apps/infra/statefulset.yaml -n infra
           kubectl apply -f apps/infra/deployment.yaml -n infra
+          # One-release migration guard: cluster/k3s/loki-tailscale/ (39be6f4)
+          # prepared a NodePort Service `loki-tailscale` in `infra` for the
+          # previous operator-applied setup. It was never actually applied
+          # (confirmed: no such Service exists live, no host firewall rule
+          # for 31100), but delete it idempotently anyway so an upgrade from
+          # a cluster where it WAS applied can't leave the old unauthenticated
+          # NodePort 31100 running alongside the new gateway. Safe to remove
+          # once we're confident no live cluster still has it.
+          kubectl delete service loki-tailscale -n infra --ignore-not-found
           # Loki push endpoint for the Mac, bound to portfolio's tailscale0 IP
           # only (RFC-052 D2). No NodePort, no host firewall step.
           kubectl apply -f apps/infra/loki-tailscale-gateway.yaml -n infra
