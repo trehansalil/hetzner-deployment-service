@@ -111,7 +111,7 @@ standby you start for a burst of work and that removes itself. Hetzner bills
 every started hour from creation, so the reaper deletes the node just before an
 hour ends:
 
-- `docling-node-reaper.timer` (systemd, on portfolio) runs `docling-node.sh reap` every 2 min.
+- `docling-node-reaper.timer` (systemd, on portfolio) runs `docling-node.sh tick` every 30 s (failover, then `reap`).
 - In the last 8 min of each billed hour: `down` if the docling pod is idle; if it
   is converting (≥500m CPU) keep it for the next hour.
 - After 3 billed hours: `down` even if busy — a conversion in flight fails.
@@ -119,6 +119,46 @@ hour ends:
   set them with `systemctl edit docling-node-reaper.service` (`Environment=`).
 - `./docling-node.sh reaper on|off` installs or disables the timer; `journalctl -u docling-node-reaper` shows every decision.
 - The timer runs the script from this checkout: keep a branch that has `reap` checked out here.
+
+### Failover and autostart (2026-09-26)
+
+The worker converts via **`docling-active:8090`** (`apps/pageindex-mcp/docling-active.yaml`), a
+selector-less Service with one endpoint that `docling-node.sh tick` rewrites every 30 s:
+
+| Mac `/health` | docling-1 pod | Jobs queued/running | `tick` does |
+|---|---|---|---|
+| ok | any | any | route → Mac |
+| failing | Ready | any | route → docling-1 pod |
+| failing ≥ 2 probes (~1 min) | absent | > 0 | **autostart** `up`, then route → docling-1 |
+| failing | absent | 0 | nothing (no spend without work) |
+
+- Autostart is capped at `DOCLING_AUTOSTART_MAX_PER_DAY` (6); `DOCLING_AUTOSTART=0` disables it.
+- The worker's `CONVERTER_TRANSIENT_RETRY_COUNT=3` keeps retrying a dead Mac (~135 s per attempt)
+  for ~9 min, longer than detection + bring-up, so an in-flight conversion lands on docling-1
+  instead of degrading to the legacy text-layer path.
+- When the Mac answers again, new conversions go back to it at once; docling-1 is reaped at
+  the end of its billed hour once idle.
+- A deploy re-applies `docling-active.yaml` (routing → Mac); the next tick corrects it within 30 s.
+  While docling-1 exists the deploy workflow leaves the `docling-service` Deployment alone.
+
+### Picking a server by stock (2026-09-26)
+
+`up` asks Hetzner what is in stock and takes the first match:
+
+- types in order `DOCLING_NODE_TYPES` (`cpx62 ccx33 cpx52 ccx43 cpx42 cx43`), each tried in
+  `DOCLING_NODE_LOCATIONS` (`hel1 fsn1 nbg1`) before the next type;
+- x86, disk ≥ the snapshot's, price ≤ `DOCLING_MAX_EUR_H` (0.50);
+- a create that fails (sold out since the check) moves on to the next candidate.
+
+All three locations share k3s-net's `eu-central` zone. `DOCLING_NODE_TYPE` pins one type.
+
+### Start-up time
+
+Measured 2026-09-26 on cpx62: ~90 s from create to Ready (64 s of it VM boot + k3s join).
+`up` now creates the pod before the node exists, sized from the server type (90 % of RAM
+less 512 Mi, all cores), so it schedules the instant the node joins. If it does not fit, `up`
+re-sizes it to the node's real allocatable. Node polling and the startup probe run every 2 s
+(were 10 s). The VM boot itself is Hetzner's and stays ~30-40 s.
 
 `up` sets the Deployment image to the `docling-service:<tag>` in the snapshot's
 description, so a stray ghcr tag (a `docling-service` deploy dispatch) cannot
