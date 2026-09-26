@@ -45,6 +45,14 @@ deploy-infra:
 	$(KUBECTL) apply -f apps/infra/service.yaml -n $(INFRA_NS)
 	$(KUBECTL) apply -f apps/infra/statefulset.yaml -n $(INFRA_NS)
 	$(KUBECTL) apply -f apps/infra/deployment.yaml -n $(INFRA_NS)
+	# One-release migration guard: delete the legacy NodePort Service prepared
+	# in cluster/k3s/loki-tailscale/ (39be6f4) before applying the new gateway,
+	# so an upgrade never leaves unauthenticated NodePort 31100 live alongside
+	# it. Keep in sync with .github/workflows/deploy.yml.
+	$(KUBECTL) delete service loki-tailscale -n $(INFRA_NS) --ignore-not-found
+	# Loki push endpoint for the Mac, bound to portfolio's tailscale0 IP only
+	# (RFC-052 D2). No NodePort, no host firewall step.
+	$(KUBECTL) apply -f apps/infra/loki-tailscale-gateway.yaml -n $(INFRA_NS)
 	$(KUBECTL) apply -f apps/infra/daemonset.yaml -n $(INFRA_NS)
 	$(KUBECTL) apply -f apps/infra/certificate.yaml -n $(INFRA_NS)
 	$(KUBECTL) apply -f apps/infra/ingress.yaml -n $(INFRA_NS)
@@ -58,6 +66,7 @@ deploy-infra:
 	# through the migration validation window — they are pruned at decommission, not here.
 	# See apps/infra/MIGRATION.md Phase 5.
 	$(KUBECTL) apply -f apps/infra/cronjob-pod-cleanup.yaml -n $(INFRA_NS)
+	$(KUBECTL) rollout status deployment/loki-tailscale-gateway -n $(INFRA_NS) --timeout=120s
 
 .PHONY: status-infra
 status-infra:
