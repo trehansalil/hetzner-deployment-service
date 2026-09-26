@@ -76,27 +76,46 @@ kubectl apply -n pageindex-mcp -f apps/pageindex-mcp/service.yaml \
 
 `docling-service` sits at 0 replicas until `up` sizes it to docling-1 and scales it to 1; `down` scales it back to 0.
 
-## 2. Bake the image (once per docling-service version)
+## 2. Bake the image (automatic)
 
-```bash
-./docling-node.sh bake <full pageindex commit sha>
-```
+Every docling-service build on pageindex `master` re-bakes the docling-1 snapshot
+with nothing run by hand:
 
-Creates docling-1 from ubuntu-24.04, builds `services/docling-service/Dockerfile`
-at that commit **on the node** (~15–30 min on 2 vCPU), imports the image into
-the agent's containerd as `docling-service:<sha7>`, points both Deployments at
-it, snapshots the server (label `docling-node=snapshot`, older one deleted) and
-deletes the server. No registry or pull secret is involved.
+1. `build-push-docling-service.yml` (pageindex) runs the quality gates, pushes the
+   GHCR image and dispatches `docling-service-image-updated` with `sha-<sha>`.
+2. `deploy.yml` moves `docling-service-local` to that GHCR tag and records the sha
+   as `bake-want` in ConfigMap `docling-node-state`.
+3. On its next tick with the Mac healthy and no docling-1, `docling-node-controller`
+   sees the newest snapshot's `pageindex-sha` label differs and runs `bake <sha>`.
+   At most `DOCLING_BAKE_MAX_ATTEMPTS` (2) tries per sha (`bake-tries-<sha7>`).
 
-The model download uses `HF_TOKEN` from `pageindex-mcp-secrets` when it is
-set (anonymous otherwise, which is slower and rate-limited). `bake` hands it to
-the node over SSH on the private network into `/run/hf_token` (tmpfs), and the
-Dockerfile reads it as a BuildKit secret: it is not in user-data, the image
-layers or the snapshot. The running service never needs it (models are baked
-in, runtime is offline). A `docling-service` image dispatch moves only
-`docling-service-local` to the GHCR tag; docling-1 always runs the image baked
-into its snapshot (`up` pins it), so a docling-service code change needs a
-re-bake to reach docling-1.
+`bake` creates docling-1 as a **cx33** (`DOCLING_BAKE_TYPE`; its 80 GB disk
+becomes the snapshot's minimum, which every `up` candidate has) in the first of
+hel1/fsn1/nbg1 that works, builds `services/docling-service/Dockerfile` at that
+commit **on the node** (~15–30 min), imports it into containerd as
+`docling-service:<sha7>`, snapshots the server (label `docling-node=snapshot`,
+`pageindex-sha=<sha7>`) and deletes the server. A bake that fails part-way deletes
+its server. The previous snapshot is kept as a rollback; older ones are deleted.
+Cost: about EUR 0.01 of cx33 time per bake.
+
+While a bake runs (it holds the tick lock) failover is paused; a Mac outage that
+starts first delays the bake instead. Watch it with
+`kubectl -n pageindex-mcp logs deploy/docling-node-controller -c tick -f`.
+
+**Roll back** to the previous snapshot: delete the newest
+(`hcloud image list --selector docling-node=snapshot`), and stop the tick from
+re-baking it: `kubectl -n pageindex-mcp patch configmap docling-node-state --type merge -p '{"data":{"bake-tries-<sha7>":"99"}}'`.
+**Bake by hand** (any sha): `./docling-node.sh bake <full pageindex sha>`, or run the
+deploy workflow for `docling-service` with image tag `sha-<full sha>`.
+
+The model download uses `HF_TOKEN` (the controller gets it from `pageindex-mcp-secrets`
+as env) when set, anonymous otherwise. `bake` hands it to the node over SSH on the
+private network into `/run/hf_token` (tmpfs); the Dockerfile reads it as a BuildKit
+secret, so it is not in user-data, the image layers or the snapshot. The controller's
+SSH key and the k3s join token come from the one-time Secret `docling-node-bake`
+(see `docling-node-controller.yaml`). The running service never needs HF_TOKEN
+(models are baked in, runtime is offline). docling-1 always runs the image baked
+into its snapshot (`up` pins it); only `docling-service-local` follows GHCR.
 
 ## 3. Day to day
 
@@ -131,10 +150,13 @@ applies the controller, and restarts server + worker if `configmap.yaml` changed
 controller copies the script before each tick, so a script change is live about a
 minute after the ConfigMap syncs. Nothing is run by hand on portfolio.
 
-One-time prerequisite (done 2026-09-26): the Hetzner project token as a Secret, never committed:
+One-time prerequisites (done 2026-09-26), never committed:
 
 ```bash
 kubectl -n pageindex-mcp create secret generic docling-node-hcloud --from-literal=token=<token>
+kubectl -n pageindex-mcp create secret generic docling-node-bake \
+  --from-file=ssh-key=/root/.ssh/docling_node \
+  --from-file=k3s-token=/var/lib/rancher/k3s/server/node-token
 ```
 
 The controller's image is `alpine/k8s` (kubectl, jq, curl, busybox); hcloud v1.69.0 is

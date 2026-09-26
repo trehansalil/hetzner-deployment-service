@@ -155,7 +155,8 @@ jobs:
           # the next tick) and the controller running it. Needs the one-time
           # Secret docling-node-hcloud (see docling-node-controller.yaml).
           kubectl create configmap docling-node-script -n pageindex-mcp \
-            --from-file=docling-node.sh=cluster/k3s/option-a-docling-node/docling-node.sh \
+            --from-file=cluster/k3s/option-a-docling-node/docling-node.sh \
+            --from-file=cluster/k3s/option-a-docling-node/cloud-init-docling-agent.yaml \
             --dry-run=client -o yaml | kubectl apply -f -
           kubectl apply -f apps/pageindex-mcp/docling-node-controller.yaml
           # Pods read the configmap only at start: on a push (no image
@@ -199,6 +200,16 @@ jobs:
           kubectl set image deployment/docling-service-local \
             docling-service=ghcr.io/trehansalil/docling-service:${{ steps.vars.outputs.image_tag }} \
             -n pageindex-mcp
+          # Ask docling-node-controller to re-bake the docling-1 snapshot at
+          # this commit (it bakes on its next idle tick; see docling-node.sh
+          # maybe_bake). Only for a full-sha tag, not `latest`.
+          SHA=${{ steps.vars.outputs.image_tag }}; SHA=${SHA#sha-}
+          if [[ "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            kubectl -n pageindex-mcp create configmap docling-node-state 2>/dev/null || true
+            kubectl -n pageindex-mcp patch configmap docling-node-state --type merge \
+              -p "{\"data\":{\"bake-want\":\"$SHA\"}}"
+            echo "docling-1 snapshot re-bake requested at $SHA"
+          fi
           # Recreate strategy: expect a short conversion outage; worker jobs in
           # flight fail over per the worker's remote-call timeout/retry handling.
           # docling-service is pinned to the on-demand node docling-1; while that

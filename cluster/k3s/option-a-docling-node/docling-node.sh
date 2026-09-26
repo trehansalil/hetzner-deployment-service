@@ -3,8 +3,9 @@
 #
 #   setup            one-time: private network, firewalls, DNS record, SSH key,
 #                    and the portfolio k3s private-net drop-in (restarts k3s)
-#   bake [SHA]       one-time per image: create docling-1, build the
-#                    docling-service image on it, snapshot it, delete it
+#   bake SHA         create docling-1 (cx33), build the docling-service image
+#                    on it, snapshot it, delete it. Automatic: `tick` bakes
+#                    each docling-service build deploy.yml records
 #   up               create docling-1 from the newest snapshot and join it
 #   down             drain and delete docling-1 (billing stops; snapshot kept)
 #   status           what exists right now and what it costs
@@ -89,7 +90,13 @@ NODE_PRIV_IP=10.0.0.3
 FW_PORTFOLIO=firewall-1
 FW_NODE=docling-node-fw
 SSH_KEY_NAME=portfolio-docling
-SSH_KEY=/root/.ssh/docling_node
+SSH_KEY=${DOCLING_SSH_KEY:-/root/.ssh/docling_node}
+# `bake` builds on a small x86 type: the snapshot inherits the build server's
+# disk size, and `up` can only boot it on types with at least that disk
+# (cx33 = 80 GB fits every candidate in NODE_TYPES).
+BAKE_TYPE=${DOCLING_BAKE_TYPE:-cx33}
+# Automatic re-bake (`tick`): at most this many attempts per pageindex sha.
+BAKE_MAX_ATTEMPTS=${DOCLING_BAKE_MAX_ATTEMPTS:-2}
 SNAP_SELECTOR=docling-node=snapshot
 ZONE=saliltrehan.com
 RECORD=docling
@@ -97,7 +104,11 @@ NS=pageindex-mcp
 HERE=$(cd "$(dirname "$0")" && pwd)
 K3S_DROPIN=/etc/rancher/k3s/config.yaml.d/20-private-net.yaml
 TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
+# A bake that dies after creating its server deletes it: it bills hourly.
+BAKING=0
+trap 'rc=$?; if [ "$rc" != 0 ] && [ "$BAKING" = 1 ]; then
+  BAKING=0; log "bake failed (exit $rc): deleting $NODE"; cmd_down || true; fi
+  rm -rf "$TMP"' EXIT
 
 DRY_RUN=0
 YES=0
@@ -172,7 +183,7 @@ node_ready() { kubectl get node "$NODE" --no-headers 2>/dev/null | grep -qw Read
 ssh_node() {
   ssh -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new \
     -o UserKnownHostsFile="$TMP/known_hosts" -o LogLevel=ERROR \
-    -o ConnectTimeout=5 "root@$NODE_PRIV_IP" "$@"
+    -o IdentitiesOnly=yes -o ConnectTimeout=5 "root@$NODE_PRIV_IP" "$@"
 }
 
 rules_portfolio() {
@@ -258,17 +269,32 @@ cmd_bake() {
   exists_server "$NODE" && die "$NODE already exists; run '$0 down' first"
   exists_network "$NET" || die "run '$0 setup' first"
 
+  need ssh
+  # The controller gets the join token from Secret docling-node-bake.
+  local k3s_token=${DOCLING_K3S_TOKEN:-}
+  [ -n "$k3s_token" ] || k3s_token=$(cat /var/lib/rancher/k3s/server/node-token)
+  # A token from a Secret file keeps its trailing newline; sed would choke.
+  k3s_token=$(tr -d '\r\n' <<<"$k3s_token")
   local tmp=$TMP
   ( umask 077
-    sed -e "s|__K3S_NODE_TOKEN__|$(cat /var/lib/rancher/k3s/server/node-token)|" \
+    sed -e "s|__K3S_NODE_TOKEN__|$k3s_token|" \
         -e "s|__PAGEINDEX_SHA__|$sha|" \
         "$HERE/cloud-init-docling-agent.yaml" > "$tmp/user-data.yaml" )
 
-  log "Create $NODE ($NODE_TYPE, ubuntu-24.04) — billing starts"
-  run hcloud server create --name "$NODE" --type "$NODE_TYPE" --image ubuntu-24.04 \
-    --location "$LOCATION" --ssh-key "$SSH_KEY_NAME" --firewall "$FW_NODE" \
-    --label role=k3s-agent --label workload=docling \
-    --user-data-from-file "$tmp/user-data.yaml" --start-after-create=false
+  # First location with $BAKE_TYPE in stock (a create can fail on stock).
+  local loc created=
+  for loc in $NODE_LOCATIONS; do
+    log "Create $NODE ($BAKE_TYPE, ubuntu-24.04, $loc) — billing starts"
+    BAKING=1
+    if run hcloud server create --name "$NODE" --type "$BAKE_TYPE" --image ubuntu-24.04 \
+        --location "$loc" --ssh-key "$SSH_KEY_NAME" --firewall "$FW_NODE" \
+        --label role=k3s-agent --label workload=docling \
+        --user-data-from-file "$tmp/user-data.yaml" --start-after-create=false </dev/null; then
+      created=$loc; break
+    fi
+    exists_server "$NODE" && run hcloud server delete "$NODE"
+  done
+  [ -n "$created" ] || { BAKING=0; die "$BAKE_TYPE could not be created in any of [$NODE_LOCATIONS]"; }
   run hcloud server attach-to-network "$NODE" --network "$NET" --ip "$NODE_PRIV_IP"
   run hcloud server poweron "$NODE"
 
@@ -276,8 +302,9 @@ cmd_bake() {
   # anonymous rate limits. It goes over SSH into /run (tmpfs), not into
   # user-data, so it is never in the metadata service, /var/lib/cloud, or
   # the snapshot. The bake waits up to 10 min for it, then builds anonymously.
-  local hf
-  hf=$(kubectl -n "$NS" get secret pageindex-mcp-secrets \
+  # The controller gets it as env (optional secretKeyRef), not via the API.
+  local hf=${HF_TOKEN:-}
+  [ -n "$hf" ] || [ "$IN_CLUSTER" = 1 ] || hf=$(kubectl -n "$NS" get secret pageindex-mcp-secrets \
          -o jsonpath='{.data.HF_TOKEN}' 2>/dev/null | base64 -d 2>/dev/null || true)
   wait_for 300 "SSH on $NODE" ssh_node true
   if [ -n "$hf" ]; then
@@ -295,18 +322,24 @@ cmd_bake() {
   wait_for 300 "$NODE Ready" node_ready
 
   local tag="docling-service:${sha:0:7}"
-  log "Point both docling Deployments at $tag"
-  for d in docling-service docling-service-local; do
-    run kubectl -n "$NS" set image "deployment/$d" "docling-service=$tag"
-  done
+  # docling-service-local follows the GHCR tag (deploy.yml); only the
+  # docling-1 copy runs the baked image, and `up` re-pins it from the snapshot.
+  log "Point the docling-service Deployment at $tag"
+  run kubectl -n "$NS" set image deployment/docling-service "docling-service=$tag"
 
   log "Snapshot $NODE, then delete it"
   run hcloud server shutdown "$NODE"
   wait_for 180 "$NODE off" sh -c "hcloud server describe $NODE -o json | jq -e '.status==\"off\"'"
-  local old; old=$(newest_snapshot)
   run hcloud server create-image "$NODE" --type snapshot \
     --description "docling-node $tag" --label "$SNAP_SELECTOR" --label "pageindex-sha=${sha:0:7}"
-  [ -n "$old" ] && run hcloud image delete "$old"
+  # Keep the previous snapshot as a rollback (~EUR 0.11/month): `up` boots
+  # the newest; to roll back, delete the newest. Older ones go.
+  local old
+  for old in $(hcloud image list --type snapshot --selector "$SNAP_SELECTOR" -o json \
+      | jq -r 'sort_by(.created) | reverse | .[2:][] | .id'); do
+    run hcloud image delete "$old"
+  done
+  BAKING=0
   cmd_down
   log "bake done: '$0 up' boots from the new snapshot"
 }
@@ -574,16 +607,43 @@ demand() {
   echo $(( ${queued:-0} + ${running:-0} ))
 }
 
-autostarts_today() {
-  local n
-  n=$(kubectl -n "$NS" get configmap "$STATE_CM" -o json 2>/dev/null \
-    | jq -r --arg k "autostarts-$(date -u +%F)" '.data[$k] // "0"' || true)
-  echo "${n:-0}"
+# Controller state that must survive a pod restart, in ConfigMap
+# docling-node-state: autostarts-<date> (the daily cap), bake-want (the
+# pageindex sha deploy.yml asks to bake) and bake-tries-<sha>.
+state_get() {  # state_get KEY -> value or empty
+  kubectl -n "$NS" get configmap "$STATE_CM" -o json 2>/dev/null \
+    | jq -r --arg k "$1" '.data[$k] // empty' || true
 }
-# Rewrites the whole ConfigMap: yesterday's count drops out.
-record_autostarts() {
-  kubectl -n "$NS" create configmap "$STATE_CM" --from-literal="autostarts-$(date -u +%F)=$1" \
-    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+state_set() {  # state_set KEY VALUE; drops autostarts-* keys of other days
+  kubectl -n "$NS" create configmap "$STATE_CM" >/dev/null 2>&1 || true
+  local cur; cur=$(kubectl -n "$NS" get configmap "$STATE_CM" -o json | jq -c '.data // {}')
+  kubectl -n "$NS" patch configmap "$STATE_CM" --type merge -p "$(jq -nc \
+    --argjson cur "$cur" --arg k "$1" --arg v "$2" --arg today "autostarts-$(date -u +%F)" \
+    '{data: (($cur | with_entries(select(.key | startswith("autostarts-")) | select(.key != $today)
+      | .value = null)) + {($k): $v})}')" >/dev/null
+}
+autostarts_today() { local n; n=$(state_get "autostarts-$(date -u +%F)"); echo "${n:-0}"; }
+
+# Re-bake when deploy.yml has recorded a newer docling-service build than the
+# snapshot's. Only while nothing else needs the node: the Mac answers, no
+# docling-1 exists. The bake holds the tick's lock (~20-30 min), so failover
+# is paused meanwhile; a Mac that fails first delays the bake instead.
+maybe_bake() {
+  local want have tries
+  want=$(state_get bake-want)
+  [ -n "$want" ] || return 0
+  have=$(hcloud image list --type snapshot --selector "$SNAP_SELECTOR" -o json \
+    | jq -r 'sort_by(.created) | last | .labels["pageindex-sha"] // empty')
+  [ "${want:0:7}" != "$have" ] || return 0
+  exists_server "$NODE" && return 0
+  tries=$(state_get "bake-tries-${want:0:7}"); tries=${tries:-0}
+  if [ "$tries" -ge "$BAKE_MAX_ATTEMPTS" ]; then
+    log "tick: bake of ${want:0:7} failed $tries times -- not retrying (snapshot stays ${have:-none})"
+    return 0
+  fi
+  state_set "bake-tries-${want:0:7}" $(( tries + 1 ))
+  log "tick: snapshot is ${have:-none}, docling-service ${want:0:7} was built -- baking (attempt $(( tries + 1 ))/$BAKE_MAX_ATTEMPTS)"
+  cmd_bake "$want"
 }
 
 cmd_tick() {
@@ -607,7 +667,7 @@ cmd_tick() {
       if [ "$n" -ge "$AUTOSTART_MAX_PER_DAY" ]; then
         log "tick: Mac down ($fails probes), $d job(s) waiting, but $n autostarts today (max $AUTOSTART_MAX_PER_DAY) -- not starting"
       else
-        record_autostarts $(( n + 1 ))
+        state_set "autostarts-$(date -u +%F)" $(( n + 1 ))
         log "tick: Mac down ($fails probes) and $d job(s) waiting -- starting $NODE (autostart $(( n + 1 ))/$AUTOSTART_MAX_PER_DAY today)"
         cmd_up
         route_active node
@@ -615,6 +675,7 @@ cmd_tick() {
     fi
   fi
   cmd_reap
+  [ "$fails" -ne 0 ] || maybe_bake
 }
 
 cmd_reaper() {
@@ -716,5 +777,5 @@ case "${1:-}" in
   reap) cmd_reap ;;
   tick) cmd_tick ;;
   reaper) shift; cmd_reaper "$@" ;;
-  *) sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+  *) sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac
