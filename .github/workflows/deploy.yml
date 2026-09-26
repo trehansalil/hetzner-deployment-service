@@ -121,21 +121,23 @@ jobs:
         if: steps.vars.outputs.app == 'pageindex-mcp'
         run: |
           kubectl apply -f apps/pageindex-mcp/namespace.yaml
-          # RFC-050 rollout order: docling-service must be Ready BEFORE the worker
-          # restarts with DOCLING_SERVICE_URL=http://docling-service:8080 (configmap
-          # below) — otherwise in-flight/new jobs hit a missing endpoint. service.yaml
-          # carries both the pageindex-mcp and docling-service Services.
+          # The worker converts via docling-active (docling-active.yaml): the Mac
+          # mini (docling-service-mac.yaml) or the on-demand node docling-1,
+          # switched by `docling-node.sh tick` on portfolio. Both Services must
+          # exist BEFORE the worker restarts with the configmap below.
+          # service.yaml carries the pageindex-mcp and docling-service Services.
           kubectl apply -f apps/pageindex-mcp/service.yaml -n pageindex-mcp
-          kubectl apply -f apps/pageindex-mcp/docling-service-deployment.yaml -n pageindex-mcp
-          kubectl apply -f apps/pageindex-mcp/docling-service-public.yaml -n pageindex-mcp
-          # docling-service is pinned to the on-demand node docling-1; while that
-          # node is down (docling-node.sh down) its pod is Pending by design, so
-          # only wait for the rollout when the node is Ready.
-          if kubectl get nodes -l workload=docling --no-headers 2>/dev/null | grep -qw Ready; then
-            kubectl rollout status deployment/docling-service -n pageindex-mcp --timeout=600s
+          kubectl apply -f apps/pageindex-mcp/docling-service-mac.yaml -n pageindex-mcp
+          kubectl apply -f apps/pageindex-mcp/docling-active.yaml -n pageindex-mcp
+          # While docling-1 exists, docling-node.sh owns the docling-service
+          # Deployment (replicas, image, node-sized resources): re-applying the
+          # at-rest manifest (replicas 0) would kill a conversion mid-failover.
+          if kubectl get nodes -l workload=docling --no-headers 2>/dev/null | grep -q .; then
+            echo "docling node present: leaving the docling-service Deployment to docling-node.sh"
           else
-            echo "docling node down: skipping docling-service rollout wait"
+            kubectl apply -f apps/pageindex-mcp/docling-service-deployment.yaml -n pageindex-mcp
           fi
+          kubectl apply -f apps/pageindex-mcp/docling-service-public.yaml -n pageindex-mcp
           kubectl apply -f apps/pageindex-mcp/configmap.yaml -n pageindex-mcp
           kubectl apply -f apps/pageindex-mcp/deployment.yaml -n pageindex-mcp
           kubectl apply -f apps/pageindex-mcp/worker-deployment.yaml -n pageindex-mcp
@@ -152,7 +154,12 @@ jobs:
         run: |
           kubectl apply -f apps/pageindex-mcp/namespace.yaml
           kubectl apply -f apps/pageindex-mcp/service.yaml -n pageindex-mcp
-          kubectl apply -f apps/pageindex-mcp/docling-service-deployment.yaml -n pageindex-mcp
+          # Same guard as the pageindex-mcp step: never reset a live docling-1.
+          if kubectl get nodes -l workload=docling --no-headers 2>/dev/null | grep -q .; then
+            echo "docling node present: leaving the docling-service Deployment to docling-node.sh"
+          else
+            kubectl apply -f apps/pageindex-mcp/docling-service-deployment.yaml -n pageindex-mcp
+          fi
           kubectl apply -f apps/pageindex-mcp/docling-service-public.yaml -n pageindex-mcp
           # Both copies (docling-1 node + portfolio local) run the same image.
           for d in docling-service docling-service-local; do

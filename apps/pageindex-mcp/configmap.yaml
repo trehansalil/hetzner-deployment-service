@@ -91,11 +91,16 @@ data:
   # Bearer token lives in the Secret (DOCLING_SERVICE_BEARER_TOKEN).
   # NOTE (HR3): with PII_CORPUS=true the boot gate rejects this URL — it is not
   # on the ZDR allow-list; an in-cluster exemption is needed first.
-  # 2026-09-25: pointed at the Mac mini over Tailscale (docling-service-mac.yaml;
-  # 292-page pocketbook in ~7 min vs 55+ min on docling-1). If the Mac is
-  # off, the converter chain's own fallback applies. Revert to
-  # http://docling-service:8080 (and scale docling-1 up) to switch back.
-  DOCLING_SERVICE_URL: "http://docling-service-mac:8090"
+  # 2026-09-26: docling-active (docling-active.yaml) is the Mac mini while it
+  # answers, else the on-demand docling-1 node; `docling-node.sh tick` flips it
+  # and starts docling-1 when the Mac is down and jobs wait. Benchmarks: the
+  # 292-page pocketbook in 6 min on the Mac, 13.5 min on a cpx62 docling-1.
+  DOCLING_SERVICE_URL: "http://docling-active:8090"
+  # A dead Mac costs ~135 s per attempt (kernel SYN timeout). 3 retries (4
+  # attempts, ~9 min) outlast failover (<= 1 min detection + ~90 s bring-up),
+  # so an in-flight conversion lands on docling-1 instead of degrading to the
+  # legacy text-layer path. Applies to transient converter errors only.
+  CONVERTER_TRANSIENT_RETRY_COUNT: "3"
   # Just under the worker's 3600 s MAX_EFFECTIVE_TIMEOUT cap: a 292-page PDF
   # must convert and index inside arq's hard 3630 s JOB_TIMEOUT (not env).
   DOCLING_SERVICE_TIMEOUT_S: "3300"
