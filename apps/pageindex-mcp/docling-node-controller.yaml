@@ -1,0 +1,180 @@
+# docling-node-controller: runs `docling-node.sh tick` every 30 s inside the
+# cluster (Mac/docling-1 failover routing, autostart, spot-style reaper).
+# Replaces the systemd timer on portfolio, so merging to main is all it takes:
+# deploy.yml publishes the script as ConfigMap docling-node-script and applies
+# this file on every push. The script is copied before each run, so a new
+# version takes effect on the next tick (the ConfigMap volume syncs in ~1 min).
+#
+# One-time, out of band (never committed):
+#   kubectl -n pageindex-mcp create secret generic docling-node-hcloud \
+#     --from-literal=token=<Hetzner Cloud project API token>
+#
+# RBAC: `down` drains and deletes the docling-1 Node (cluster-wide: nodes,
+# pod listing + eviction, daemonset/replicaset/statefulset lookups for drain,
+# metrics for the busy check, the redis Service in infra). Namespaced:
+# scale/patch docling-service, write the docling-active EndpointSlice and the
+# docling-node-state ConfigMap.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: docling-node-controller
+  namespace: pageindex-mcp
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: docling-node-controller
+rules:
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list, watch, patch, update, delete]
+  - apiGroups: [""]
+    resources: [pods, services]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [pods/eviction]
+    verbs: [create]
+  - apiGroups: [apps]
+    resources: [daemonsets, replicasets, statefulsets]
+    verbs: [get, list]
+  - apiGroups: [metrics.k8s.io]
+    resources: [pods]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: docling-node-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: docling-node-controller
+subjects:
+  - kind: ServiceAccount
+    name: docling-node-controller
+    namespace: pageindex-mcp
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: docling-node-controller
+  namespace: pageindex-mcp
+rules:
+  - apiGroups: [apps]
+    resources: [deployments, deployments/scale]
+    verbs: [get, list, watch, patch, update]
+  - apiGroups: [discovery.k8s.io]
+    resources: [endpointslices]
+    verbs: [get, list, create, patch, update]
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, create, patch, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: docling-node-controller
+  namespace: pageindex-mcp
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: docling-node-controller
+subjects:
+  - kind: ServiceAccount
+    name: docling-node-controller
+    namespace: pageindex-mcp
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: docling-node-controller
+  namespace: pageindex-mcp
+  labels:
+    app: docling-node-controller
+spec:
+  replicas: 1
+  # Never two tick loops at once (the lock is per pod).
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: docling-node-controller
+  template:
+    metadata:
+      labels:
+        app: docling-node-controller
+    spec:
+      serviceAccountName: docling-node-controller
+      # Never on the node it deletes.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: workload
+                    operator: NotIn
+                    values: [docling]
+      initContainers:
+        - name: hcloud
+          image: alpine/k8s:1.34.11
+          command:
+            - sh
+            - -ec
+            - |
+              cd /tmp
+              curl -fsSLo hcloud.tgz \
+                https://github.com/hetznercloud/cli/releases/download/v1.69.0/hcloud-linux-amd64.tar.gz
+              echo "aca1a346c8d218a094f1811ee1705013d394cabf48e40887292caff464b64277  hcloud.tgz" | sha256sum -c -
+              tar -xzf hcloud.tgz -C /tools hcloud
+              /tools/hcloud version
+          volumeMounts:
+            - name: tools
+              mountPath: /tools
+      containers:
+        - name: tick
+          image: alpine/k8s:1.34.11
+          command:
+            - bash
+            - -c
+            - |
+              while :; do
+                cp /script/docling-node.sh /state/docling-node.sh
+                timeout 25m bash /state/docling-node.sh tick || echo "tick exited $?"
+                sleep 30
+              done
+          env:
+            - name: PATH
+              value: /tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+            - name: HOME
+              value: /state
+            - name: DOCLING_STATE_DIR
+              value: /state
+            - name: DOCLING_LOCK
+              value: /state/lock
+            - name: HCLOUD_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: docling-node-hcloud
+                  key: token
+          resources:
+            requests:
+              cpu: 10m
+              memory: 48Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts:
+            - name: script
+              mountPath: /script
+            - name: state
+              mountPath: /state
+            - name: tools
+              mountPath: /tools
+      volumes:
+        - name: script
+          configMap:
+            name: docling-node-script
+        - name: state
+          emptyDir: {}
+        - name: tools
+          emptyDir: {}

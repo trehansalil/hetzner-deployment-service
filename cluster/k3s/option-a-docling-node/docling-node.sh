@@ -9,16 +9,18 @@
 #   down             drain and delete docling-1 (billing stops; snapshot kept)
 #   status           what exists right now and what it costs
 #   local on|off     the portfolio copy of docling-service (needs cx43 RAM)
-#   tick             run every 30 s by the systemd timer
-#                    (docling-node-reaper.timer): route docling-active to the
-#                    Mac or docling-1, autostart docling-1 when the Mac is
-#                    down and jobs wait, then `reap`
+#   tick             run every 30 s by the in-cluster controller
+#                    (apps/pageindex-mcp/docling-node-controller.yaml, deployed
+#                    on every push to main): route docling-active to the Mac or
+#                    docling-1, autostart docling-1 when the Mac is down and
+#                    jobs wait, then `reap`
 #   reap             spot-style auto-delete: in the last
 #                    DOCLING_REAP_MARGIN_MIN (8) minutes of each billed hour,
 #                    `down` unless the docling pod is busy converting (>=
 #                    DOCLING_BUSY_MCPU, 500m); after DOCLING_MAX_HOURS (3)
 #                    billed hours, `down` even if busy
-#   reaper on|off    install + enable, or disable, that timer
+#   reaper on|off    host fallback: the same tick from a systemd timer on
+#                    portfolio (retires itself once the controller runs)
 #
 # Flags: --dry-run prints every mutating command instead of running it.
 #        --yes answers the confirmation prompts (non-interactive runs).
@@ -29,7 +31,8 @@
 # firewalls are free.
 #
 # Run on portfolio as root: it needs hcloud (context with a project token),
-# kubectl, and /var/lib/rancher/k3s/server/node-token.
+# kubectl, and /var/lib/rancher/k3s/server/node-token. tick/up/down/reap/status
+# also run in the controller pod (HCLOUD_TOKEN from Secret docling-node-hcloud).
 set -euo pipefail
 
 NODE=docling-1
@@ -69,8 +72,13 @@ ACTIVE_SLICE=docling-active-1
 REDIS_SVC=redis
 REDIS_NS=infra
 REDIS_DB=1
-STATE_DIR=/var/lib/docling-node
-LOCK=/run/lock/docling-node.lock
+STATE_DIR=${DOCLING_STATE_DIR:-/var/lib/docling-node}
+LOCK=${DOCLING_LOCK:-/run/lock/docling-node.lock}
+# Autostart counts live in this ConfigMap, not STATE_DIR, so a restarted
+# controller pod cannot reset the daily cap.
+STATE_CM=docling-node-state
+CONTROLLER=docling-node-controller
+IN_CLUSTER=0; [ -z "${KUBERNETES_SERVICE_HOST:-}" ] || IN_CLUSTER=1
 LOCATION=hel1
 NET=k3s-net
 NET_RANGE=10.0.0.0/16
@@ -406,7 +414,8 @@ cmd_up() {
   run kubectl -n "$NS" rollout status deployment/docling-service --timeout=600s
   # traefik picks up the new endpoint a few seconds after the rollout: retry
   # the 503 for up to a minute, and warn rather than fail (the node is up).
-  if [ "$DRY_RUN" != 1 ]; then
+  # Skipped in the controller: failover routes to the pod IP, not the ingress.
+  if [ "$DRY_RUN" != 1 ] && [ "$IN_CLUSTER" = 0 ]; then
     local t=0
     until curl -fsS -m 10 "https://$RECORD.$ZONE/health"; do
       t=$((t+5)); [ "$t" -ge 60 ] && { log "WARN: https://$RECORD.$ZONE/health not answering yet"; break; }
@@ -414,7 +423,7 @@ cmd_up() {
     done
     echo
   fi
-  if systemctl is-active --quiet "$REAPER_UNIT.timer"; then
+  if [ "$IN_CLUSTER" = 1 ] || systemctl is-active --quiet "$REAPER_UNIT.timer"; then
     log "up ($created). The reaper deletes $NODE near the end of each billed hour unless it is converting (max $MAX_HOURS h)."
   else
     log "up ($created). WARN: reaper timer is off ('$0 reaper on'); run '$0 down' when done -- $NODE bills hourly."
@@ -473,9 +482,10 @@ docling_mcpu() {
 
 cmd_reap() {
   exists_server "$NODE" || return 0
-  local created age_min into_hour billed cpu
-  created=$(hcloud server describe "$NODE" -o json | jq -r .created)
-  age_min=$(( ( $(date +%s) - $(date -d "$created" +%s) ) / 60 ))
+  local age_min into_hour billed cpu
+  # In jq, not date -d: the controller image's busybox date cannot parse it.
+  age_min=$(hcloud server describe "$NODE" -o json | jq -r '
+    (now - (.created | sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z") | fromdateiso8601)) / 60 | floor')
   into_hour=$(( age_min % 60 ))
   billed=$(( age_min / 60 + 1 ))
   # Any age from the last margin of the final allowed hour onwards, so a
@@ -564,6 +574,18 @@ demand() {
   echo $(( ${queued:-0} + ${running:-0} ))
 }
 
+autostarts_today() {
+  local n
+  n=$(kubectl -n "$NS" get configmap "$STATE_CM" -o json 2>/dev/null \
+    | jq -r --arg k "autostarts-$(date -u +%F)" '.data[$k] // "0"' || true)
+  echo "${n:-0}"
+}
+# Rewrites the whole ConfigMap: yesterday's count drops out.
+record_autostarts() {
+  kubectl -n "$NS" create configmap "$STATE_CM" --from-literal="autostarts-$(date -u +%F)=$1" \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+}
+
 cmd_tick() {
   mkdir -p "$STATE_DIR"
   local fails=0
@@ -581,12 +603,11 @@ cmd_tick() {
   elif [ "$fails" -ge "$MAC_FAILS" ] && [ "$AUTOSTART" = 1 ] && ! exists_server "$NODE"; then
     local d; d=$(demand)
     if [ "$d" -gt 0 ]; then
-      local day="$STATE_DIR/autostarts-$(date -u +%F)" n
-      n=$(cat "$day" 2>/dev/null || echo 0)
+      local n; n=$(autostarts_today)
       if [ "$n" -ge "$AUTOSTART_MAX_PER_DAY" ]; then
         log "tick: Mac down ($fails probes), $d job(s) waiting, but $n autostarts today (max $AUTOSTART_MAX_PER_DAY) -- not starting"
       else
-        echo $(( n + 1 )) >"$day"
+        record_autostarts $(( n + 1 ))
         log "tick: Mac down ($fails probes) and $d job(s) waiting -- starting $NODE (autostart $(( n + 1 ))/$AUTOSTART_MAX_PER_DAY today)"
         cmd_up
         route_active node
@@ -656,12 +677,33 @@ cmd_local() {
   esac
 }
 
+# A host timer from before the in-cluster controller retires itself once the
+# controller is running, so exactly one tick loop drives docling-1.
+case "${1:-}" in
+  tick|reap)
+    if [ "$IN_CLUSTER" = 0 ] && [ "$(kubectl -n "$NS" get deployment "$CONTROLLER" \
+         -o jsonpath='{.status.readyReplicas}' 2>/dev/null)" = 1 ]; then
+      log "$CONTROLLER runs $1 in the cluster; disabling the host timer $REAPER_UNIT.timer"
+      systemctl disable --now "$REAPER_UNIT.timer" 2>/dev/null || true
+      exit 0
+    fi ;;
+esac
+
 # One mutating command at a time: the timer's tick skips its turn while a
 # manual up/down (or a long autostart) holds the lock.
 case "${1:-}" in
   up|down|reap|tick)
+    mkdir -p "$(dirname "$LOCK")"
     exec 9>"$LOCK"
-    if [ "$1" = tick ]; then flock -n 9 || exit 0; else flock -w 900 9 || die "lock busy: $LOCK"; fi ;;
+    # Polled, not `flock -w`: the controller image's busybox flock has no -w.
+    if [ "$1" = tick ]; then flock -n 9 || exit 0
+    else
+      t=0
+      until flock -n 9; do
+        t=$((t+2)); [ "$t" -ge 900 ] && die "lock busy: $LOCK"
+        sleep 2
+      done
+    fi ;;
 esac
 
 case "${1:-}" in
@@ -674,5 +716,5 @@ case "${1:-}" in
   reap) cmd_reap ;;
   tick) cmd_tick ;;
   reaper) shift; cmd_reaper "$@" ;;
-  *) sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+  *) sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

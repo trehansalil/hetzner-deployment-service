@@ -33,7 +33,8 @@ everything; every mutating step accepts `--dry-run`.
 
 | File | Purpose |
 |---|---|
-| `docling-node.sh` | `setup`, `bake`, `up`, `down`, `status`, `local on\|off` |
+| `docling-node.sh` | `setup`, `bake`, `up`, `down`, `status`, `local on\|off`, `tick`, `reap` |
+| `apps/pageindex-mcp/docling-node-controller.yaml` | in-cluster loop running `tick` every 30 s, with its RBAC |
 | `server-private-net.yaml` | k3s drop-in for portfolio: node-ip/flannel on the private NIC, public IP kept as ExternalIP and cert SAN |
 | `cloud-init-docling-agent.yaml` | first-boot user-data for `bake`: joins as agent, builds the image from the public repo, imports it into containerd, removes docker |
 | `apps/pageindex-mcp/docling-service-deployment.yaml` | two Deployments behind one Service: `docling-service` (pinned to docling-1) and `docling-service-local` (portfolio, replicas 0) |
@@ -92,9 +93,10 @@ set (anonymous otherwise, which is slower and rate-limited). `bake` hands it to
 the node over SSH on the private network into `/run/hf_token` (tmpfs), and the
 Dockerfile reads it as a BuildKit secret: it is not in user-data, the image
 layers or the snapshot. The running service never needs it (models are baked
-in, runtime is offline). Once
-`build-push-docling-service.yml` publishes to GHCR from master, the deploy
-workflow switches the Deployments to the GHCR tag instead.
+in, runtime is offline). A `docling-service` image dispatch moves only
+`docling-service-local` to the GHCR tag; docling-1 always runs the image baked
+into its snapshot (`up` pins it), so a docling-service code change needs a
+re-bake to reach docling-1.
 
 ## 3. Day to day
 
@@ -111,14 +113,40 @@ standby you start for a burst of work and that removes itself. Hetzner bills
 every started hour from creation, so the reaper deletes the node just before an
 hour ends:
 
-- `docling-node-reaper.timer` (systemd, on portfolio) runs `docling-node.sh tick` every 30 s (failover, then `reap`).
+- The **`docling-node-controller`** Deployment (`apps/pageindex-mcp/docling-node-controller.yaml`,
+  on portfolio) runs `docling-node.sh tick` every 30 s (failover, then `reap`).
 - In the last 8 min of each billed hour: `down` if the docling pod is idle; if it
   is converting (≥500m CPU) keep it for the next hour.
 - After 3 billed hours: `down` even if busy — a conversion in flight fails.
-- Knobs: `DOCLING_REAP_MARGIN_MIN` (8), `DOCLING_BUSY_MCPU` (500), `DOCLING_MAX_HOURS` (3);
-  set them with `systemctl edit docling-node-reaper.service` (`Environment=`).
-- `./docling-node.sh reaper on|off` installs or disables the timer; `journalctl -u docling-node-reaper` shows every decision.
-- The timer runs the script from this checkout: keep a branch that has `reap` checked out here.
+- Knobs: `DOCLING_REAP_MARGIN_MIN` (8), `DOCLING_BUSY_MCPU` (500), `DOCLING_MAX_HOURS` (3),
+  and the autostart ones below: add them to the controller's `env:` and merge.
+- `kubectl -n pageindex-mcp logs deploy/docling-node-controller -c tick` shows every decision
+  (a healthy Mac with no node logs nothing).
+
+#### Fully automatic from main
+
+Every push to `main` that touches `apps/pageindex-mcp/` or this directory runs the
+deploy workflow, which publishes `docling-node.sh` as ConfigMap `docling-node-script`,
+applies the controller, and restarts server + worker if `configmap.yaml` changed. The
+controller copies the script before each tick, so a script change is live about a
+minute after the ConfigMap syncs. Nothing is run by hand on portfolio.
+
+One-time prerequisite (done 2026-09-26): the Hetzner project token as a Secret, never committed:
+
+```bash
+kubectl -n pageindex-mcp create secret generic docling-node-hcloud --from-literal=token=<token>
+```
+
+The controller's image is `alpine/k8s` (kubectl, jq, curl, busybox); hcloud v1.69.0 is
+downloaded and checksum-verified by an initContainer. RBAC: cluster-wide node
+patch/delete, pod eviction and reads for `drain`, metrics for the busy check; namespaced
+patch/scale of Deployments, the `docling-active` EndpointSlice, and ConfigMap
+`docling-node-state` (the daily autostart count, so a pod restart cannot reset the cap).
+
+Manual commands still work from portfolio or inside the pod
+(`kubectl -n pageindex-mcp exec deploy/docling-node-controller -c tick -- bash /state/docling-node.sh status`);
+they share the tick's lock. The old host timer (`reaper on|off`) is a fallback only: it
+disables itself as soon as the controller is Ready.
 
 ### Failover and autostart (2026-09-26)
 
