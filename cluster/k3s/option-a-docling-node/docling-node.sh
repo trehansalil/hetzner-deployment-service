@@ -9,11 +9,18 @@
 #   down             drain and delete docling-1 (billing stops; snapshot kept)
 #   status           what exists right now and what it costs
 #   local on|off     the portfolio copy of docling-service (needs cx43 RAM)
+#   reap             spot-style auto-delete, run every 2 min by the systemd
+#                    timer (docling-node-reaper.timer): in the last
+#                    DOCLING_REAP_MARGIN_MIN (8) minutes of each billed hour,
+#                    `down` unless the docling pod is busy converting (>=
+#                    DOCLING_BUSY_MCPU, 500m); after DOCLING_MAX_HOURS (3)
+#                    billed hours, `down` even if busy
+#   reaper on|off    install + enable, or disable, that timer
 #
 # Flags: --dry-run prints every mutating command instead of running it.
 #        --yes answers the confirmation prompts (non-interactive runs).
 #
-# Costs (hel1, 2026-09-25): cx33 EUR 0.0136/h + primary IPv4 EUR 0.0008/h
+# Costs (hel1, 2026-09-26): cpx62 EUR 0.2083/h + primary IPv4 EUR 0.0008/h
 # while docling-1 exists (powered off still bills; only `down` stops it).
 # The snapshot bills EUR 0.0143/GB/month while kept. Private networks and
 # firewalls are free.
@@ -23,10 +30,18 @@
 set -euo pipefail
 
 NODE=docling-1
-# cx33 (4 vCPU / 8 GB). cx23 (2 / 4 GB) was tried first: a 292-page PDF ran
-# ~25 s/page and the pod was evicted for node memory pressure (2026-09-25).
-# DOCLING_NODE_TYPE overrides it; the snapshot boots on any larger x86 type.
-NODE_TYPE=${DOCLING_NODE_TYPE:-cx33}
+# cpx62 (16 shared vCPU / 32 GB, EUR 0.2083/h) since 2026-09-26: the Mac mini
+# is the primary converter and this node is a spot-style standby. cx23 (2 / 4
+# GB) and cx33 (4 / 8 GB) were too slow for a 292-page PDF (~25-30 s/page; the
+# cx33 hit the 55-min service limit). DOCLING_NODE_TYPE overrides it; the
+# snapshot (80 GB disk) boots on any x86 type with a disk that large.
+NODE_TYPE=${DOCLING_NODE_TYPE:-cpx62}
+# Spot-style reaper (see `reap`). Hetzner bills every started hour from the
+# server's creation, so deleting just before an hour ends wastes nothing.
+REAP_MARGIN_MIN=${DOCLING_REAP_MARGIN_MIN:-8}
+BUSY_MCPU=${DOCLING_BUSY_MCPU:-500}
+MAX_HOURS=${DOCLING_MAX_HOURS:-3}
+REAPER_UNIT=docling-node-reaper
 LOCATION=hel1
 NET=k3s-net
 NET_RANGE=10.0.0.0/16
@@ -295,6 +310,12 @@ cmd_up() {
   run hcloud server poweron "$NODE"
   wait_for 300 "$NODE Ready" node_ready
   size_pod_to_node
+  # Run the image baked into the snapshot (its description ends in the tag).
+  # A docling-service deploy dispatch can repoint the Deployment at a ghcr
+  # tag that was never pushed; the node would then sit in ImagePullBackOff.
+  local img; img=$(hcloud image describe "$snap" -o json | jq -r '.description | split(" ") | last')
+  [[ "$img" == docling-service:* ]] || die "snapshot $snap description has no docling-service:<tag>"
+  run kubectl -n "$NS" set image deployment/docling-service "docling-service=$img"
   run kubectl -n "$NS" scale deployment/docling-service --replicas=1
   run kubectl uncordon "$NODE"
   run kubectl -n "$NS" rollout status deployment/docling-service --timeout=600s
@@ -308,7 +329,11 @@ cmd_up() {
     done
     echo
   fi
-  log "up. Remember '$0 down' when done: $NODE bills hourly while it exists."
+  if systemctl is-active --quiet "$REAPER_UNIT.timer"; then
+    log "up. The reaper deletes $NODE near the end of each billed hour unless it is converting (max $MAX_HOURS h)."
+  else
+    log "up. WARN: reaper timer is off ('$0 reaper on'); run '$0 down' when done -- $NODE bills hourly."
+  fi
 }
 
 cmd_down() {
@@ -332,7 +357,7 @@ cmd_down() {
 cmd_status() {
   if exists_server "$NODE"; then
     hcloud server describe "$NODE" -o json | jq -r \
-      '"server: \(.name) \(.server_type.name) \(.status) created \(.created)  (EUR 0.0144/h for cx33 while it exists)"'
+      '"server: \(.name) \(.server_type.name) \(.status) created \(.created)  (EUR \(.server_type.prices[] | select(.location == "'"$LOCATION"'") | .price_hourly.gross | tonumber * 10000 | round / 10000)/h while it exists)"'
   else
     echo "server: $NODE absent (not billing)"
   fi
@@ -341,6 +366,76 @@ cmd_status() {
   hcloud image list --type snapshot --selector "$SNAP_SELECTOR" -o json | jq -r \
     '.[] | "snapshot: \(.id) \(.description) \(.image_size // 0 | . * 100 | round / 100) GB  (~EUR \(.image_size // 0 | . * 0.0143 * 100 | round / 100)/month)"'
   hcloud server describe "$PORTFOLIO" -o json | jq -r '"portfolio: \(.server_type.name) (\(.server_type.memory) GB)"'
+}
+
+# Summed CPU of the docling-service pods in millicores (0 when none or no
+# metrics yet). kubectl top prints "1234m" or whole cores ("2").
+docling_mcpu() {
+  { kubectl top pod -n "$NS" -l app=docling-service --no-headers 2>/dev/null || true; } \
+    | awk '{c=$2; if (c ~ /m$/) {sub(/m$/, "", c)} else {c=c*1000}; s+=c} END {print s+0}'
+}
+
+cmd_reap() {
+  exists_server "$NODE" || return 0
+  local created age_min into_hour billed cpu
+  created=$(hcloud server describe "$NODE" -o json | jq -r .created)
+  age_min=$(( ( $(date +%s) - $(date -d "$created" +%s) ) / 60 ))
+  into_hour=$(( age_min % 60 ))
+  billed=$(( age_min / 60 + 1 ))
+  # Any age from the last margin of the final allowed hour onwards, so a
+  # missed tick (host reboot, API error) cannot let the node outlive the cap.
+  if [ "$age_min" -ge $(( MAX_HOURS * 60 - REAP_MARGIN_MIN )) ]; then
+    log "reap: $NODE is ${age_min} min old, hour $billed of max $MAX_HOURS -- deleting even if busy"
+    cmd_down
+    return
+  fi
+  if [ "$into_hour" -lt $(( 60 - REAP_MARGIN_MIN )) ]; then
+    log "reap: $NODE ${age_min} min old (billed hour $billed, ${into_hour} min in) -- keep"
+    return 0
+  fi
+  cpu=$(docling_mcpu)
+  if [ "$cpu" -ge "$BUSY_MCPU" ]; then
+    log "reap: $NODE busy (${cpu}m CPU) near the end of hour $billed -- keeping it for hour $(( billed + 1 ))"
+    return 0
+  fi
+  log "reap: $NODE idle (${cpu}m CPU), ${into_hour} min into billed hour $billed -- deleting"
+  cmd_down
+}
+
+cmd_reaper() {
+  local unit=/etc/systemd/system/$REAPER_UNIT
+  case "${1:-}" in
+    on)
+      [ "$DRY_RUN" = 1 ] || {
+        cat >"$unit.service" <<EOF
+[Unit]
+Description=Spot-style reaper for the on-demand docling node ($NODE)
+
+[Service]
+Type=oneshot
+Environment=HOME=/root
+Environment=KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+ExecStart=$HERE/docling-node.sh reap
+EOF
+        cat >"$unit.timer" <<EOF
+[Unit]
+Description=Run the docling node reaper every 2 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+AccuracySec=15s
+
+[Install]
+WantedBy=timers.target
+EOF
+      }
+      run systemctl daemon-reload
+      run systemctl enable --now "$REAPER_UNIT.timer"
+      ;;
+    off) run systemctl disable --now "$REAPER_UNIT.timer" ;;
+    *) die "usage: $0 reaper on|off" ;;
+  esac
 }
 
 cmd_local() {
@@ -373,5 +468,7 @@ case "${1:-}" in
   down) cmd_down ;;
   status) cmd_status ;;
   local) shift; cmd_local "$@" ;;
-  *) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+  reap) cmd_reap ;;
+  reaper) shift; cmd_reaper "$@" ;;
+  *) sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac
