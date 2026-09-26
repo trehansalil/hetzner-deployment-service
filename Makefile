@@ -302,10 +302,25 @@ PAGEINDEX_IMAGE_TAG ?= latest
 .PHONY: deploy-pageindex
 deploy-pageindex:
 	$(KUBECTL) apply -f apps/pageindex-mcp/namespace.yaml
-	# RFC-050: docling-service Ready before the worker picks up DOCLING_SERVICE_URL.
+	# Mirrors the deploy.yml "Apply k8s manifests — pageindex-mcp" step; keep them in sync.
+	# The worker converts via docling-active (Mac mini or docling-1, switched by
+	# `docling-node.sh tick`); both Services must exist BEFORE the worker restarts.
 	$(KUBECTL) apply -f apps/pageindex-mcp/service.yaml -n $(PAGEINDEX_NS)
-	$(KUBECTL) apply -f apps/pageindex-mcp/docling-service-deployment.yaml -n $(PAGEINDEX_NS)
+	$(KUBECTL) apply -f apps/pageindex-mcp/docling-service-mac.yaml -n $(PAGEINDEX_NS)
+	$(KUBECTL) apply -f apps/pageindex-mcp/docling-active.yaml -n $(PAGEINDEX_NS)
+	# While docling-1 exists, docling-node.sh owns the docling-service Deployment:
+	# re-applying the at-rest manifest (replicas 0) would kill a running conversion.
+	if $(KUBECTL) get nodes -l workload=docling --no-headers 2>/dev/null | grep -q .; then \
+	  echo "docling node present: leaving the docling-service Deployment to docling-node.sh"; \
+	else $(KUBECTL) apply -f apps/pageindex-mcp/docling-service-deployment.yaml -n $(PAGEINDEX_NS); fi
 	$(KUBECTL) apply -f apps/pageindex-mcp/docling-service-public.yaml -n $(PAGEINDEX_NS)
+	# Failover/reaper loop: script ConfigMap + the controller that runs it
+	# (needs the one-time Secret docling-node-hcloud).
+	$(KUBECTL) create configmap docling-node-script -n $(PAGEINDEX_NS) \
+		--from-file=cluster/k3s/option-a-docling-node/docling-node.sh \
+		--from-file=cluster/k3s/option-a-docling-node/cloud-init-docling-agent.yaml \
+		--dry-run=client -o yaml | $(KUBECTL) apply -f -
+	$(KUBECTL) apply -f apps/pageindex-mcp/docling-node-controller.yaml
 	# docling-service is pinned to the on-demand node; skip the wait while it is down.
 	if $(KUBECTL) get nodes -l workload=docling --no-headers 2>/dev/null | grep -qw Ready; then \
 	  $(KUBECTL) rollout status deployment/docling-service -n $(PAGEINDEX_NS) --timeout=600s; \

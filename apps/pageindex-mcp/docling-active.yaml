@@ -1,0 +1,42 @@
+# What the worker converts through (DOCLING_SERVICE_URL=http://docling-active:8090).
+# Selector-less: its one endpoint is either the Mac mini (docling-service-mac,
+# 100.106.50.6:8090) or the docling-service pod on the on-demand node docling-1
+# (<pod IP>:8080). The in-cluster Deployment docling-node-controller
+# (docling-node-controller.yaml; `docling-node.sh tick` every 30 s) owns and
+# rewrites the EndpointSlice. The host timer docling-node-reaper.timer on
+# portfolio is only a fallback that disables itself once the controller is
+# Ready. Routing: Mac while it answers /health, docling-1
+# once its pod is Ready and the Mac is not. See
+# cluster/k3s/option-a-docling-node/RUNBOOK.md "Failover".
+#
+# The slice below is the at-rest state (the Mac). A deploy re-applies it; if
+# docling-1 was serving at that moment, the next tick (<= 30 s) points it
+# back, and the worker's transient retry covers the gap.
+apiVersion: v1
+kind: Service
+metadata:
+  name: docling-active
+  namespace: pageindex-mcp
+  labels:
+    app: docling-active
+spec:
+  ports:
+    - name: http
+      port: 8090
+      protocol: TCP
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: docling-active-1
+  namespace: pageindex-mcp
+  labels:
+    kubernetes.io/service-name: docling-active
+    endpointslice.kubernetes.io/managed-by: docling-node-tick
+addressType: IPv4
+ports:
+  - name: http
+    port: 8090
+    protocol: TCP
+endpoints:
+  - addresses: ["100.106.50.6"]  # salils-mac-mini on the tailnet

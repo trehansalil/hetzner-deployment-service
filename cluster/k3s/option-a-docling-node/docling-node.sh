@@ -3,30 +3,83 @@
 #
 #   setup            one-time: private network, firewalls, DNS record, SSH key,
 #                    and the portfolio k3s private-net drop-in (restarts k3s)
-#   bake [SHA]       one-time per image: create docling-1, build the
-#                    docling-service image on it, snapshot it, delete it
+#   bake SHA         create docling-1 (cx33), build the docling-service image
+#                    on it, snapshot it, delete it. Automatic: `tick` bakes
+#                    each docling-service build deploy.yml records
 #   up               create docling-1 from the newest snapshot and join it
 #   down             drain and delete docling-1 (billing stops; snapshot kept)
 #   status           what exists right now and what it costs
 #   local on|off     the portfolio copy of docling-service (needs cx43 RAM)
+#   tick             run every 30 s by the in-cluster controller
+#                    (apps/pageindex-mcp/docling-node-controller.yaml, deployed
+#                    on every push to main): route docling-active to the Mac or
+#                    docling-1, autostart docling-1 when the Mac is down and
+#                    jobs wait, then `reap`
+#   reap             spot-style auto-delete: in the last
+#                    DOCLING_REAP_MARGIN_MIN (8) minutes of each billed hour,
+#                    `down` unless the docling pod is busy converting (>=
+#                    DOCLING_BUSY_MCPU, 500m); after DOCLING_MAX_HOURS (3)
+#                    billed hours, `down` even if busy
+#   reaper on|off    host fallback: the same tick from a systemd timer on
+#                    portfolio (retires itself once the controller runs)
 #
 # Flags: --dry-run prints every mutating command instead of running it.
 #        --yes answers the confirmation prompts (non-interactive runs).
 #
-# Costs (hel1, 2026-09-25): cx33 EUR 0.0136/h + primary IPv4 EUR 0.0008/h
+# Costs (hel1, 2026-09-26): cpx62 EUR 0.2083/h + primary IPv4 EUR 0.0008/h
 # while docling-1 exists (powered off still bills; only `down` stops it).
 # The snapshot bills EUR 0.0143/GB/month while kept. Private networks and
 # firewalls are free.
 #
 # Run on portfolio as root: it needs hcloud (context with a project token),
-# kubectl, and /var/lib/rancher/k3s/server/node-token.
+# kubectl, and /var/lib/rancher/k3s/server/node-token. tick/up/down/reap/status
+# also run in the controller pod (HCLOUD_TOKEN from Secret docling-node-hcloud).
 set -euo pipefail
 
 NODE=docling-1
-# cx33 (4 vCPU / 8 GB). cx23 (2 / 4 GB) was tried first: a 292-page PDF ran
-# ~25 s/page and the pod was evicted for node memory pressure (2026-09-25).
-# DOCLING_NODE_TYPE overrides it; the snapshot boots on any larger x86 type.
-NODE_TYPE=${DOCLING_NODE_TYPE:-cx33}
+# cpx62 (16 shared vCPU / 32 GB, EUR 0.2083/h) since 2026-09-26: the Mac mini
+# is the primary converter and this node is a spot-style standby. cx23 (2 / 4
+# GB) and cx33 (4 / 8 GB) were too slow for a 292-page PDF (~25-30 s/page; the
+# cx33 hit the 55-min service limit). DOCLING_NODE_TYPE overrides it; the
+# snapshot (80 GB disk) boots on any x86 type with a disk that large.
+NODE_TYPE=${DOCLING_NODE_TYPE:-cpx62}
+# Spot-style reaper (see `reap`). Hetzner bills every started hour from the
+# server's creation, so deleting just before an hour ends wastes nothing.
+REAP_MARGIN_MIN=${DOCLING_REAP_MARGIN_MIN:-8}
+BUSY_MCPU=${DOCLING_BUSY_MCPU:-500}
+MAX_HOURS=${DOCLING_MAX_HOURS:-3}
+REAPER_UNIT=docling-node-reaper
+# Stock-aware `up`: the first (type, location) pair Hetzner has in stock,
+# walking types in order of preference and, for each, locations in order.
+# All three EU locations share the eu-central zone of k3s-net, so a node in
+# fsn1/nbg1 joins portfolio's private network like one in hel1. Types must be
+# x86 with a disk at least the snapshot's size, and cost <= DOCLING_MAX_EUR_H.
+# DOCLING_NODE_TYPE, when set, pins `up` to that one type.
+NODE_TYPES=${DOCLING_NODE_TYPES:-cpx62 ccx33 cpx52 ccx43 cpx42 cx43}
+[ -z "${DOCLING_NODE_TYPE:-}" ] || NODE_TYPES=$DOCLING_NODE_TYPE
+NODE_LOCATIONS=${DOCLING_NODE_LOCATIONS:-hel1 fsn1 nbg1}
+MAX_EUR_H=${DOCLING_MAX_EUR_H:-0.50}
+# Failover (`tick`): the worker converts via docling-active:8090, a
+# selector-less Service whose EndpointSlice `tick` points at the Mac while it
+# answers, else at docling-1's pod. With AUTOSTART, a Mac that fails
+# MAC_FAILS consecutive probes while conversion jobs are queued or running
+# brings docling-1 up (at most AUTOSTART_MAX_PER_DAY times a day).
+AUTOSTART=${DOCLING_AUTOSTART:-1}
+AUTOSTART_MAX_PER_DAY=${DOCLING_AUTOSTART_MAX_PER_DAY:-6}
+MAC_FAILS=${DOCLING_MAC_FAILS:-2}
+MAC_SLICE=docling-service-mac-1
+ACTIVE_SVC=docling-active
+ACTIVE_SLICE=docling-active-1
+REDIS_SVC=redis
+REDIS_NS=infra
+REDIS_DB=1
+STATE_DIR=${DOCLING_STATE_DIR:-/var/lib/docling-node}
+LOCK=${DOCLING_LOCK:-/run/lock/docling-node.lock}
+# Autostart counts live in this ConfigMap, not STATE_DIR, so a restarted
+# controller pod cannot reset the daily cap.
+STATE_CM=docling-node-state
+CONTROLLER=docling-node-controller
+IN_CLUSTER=0; [ -z "${KUBERNETES_SERVICE_HOST:-}" ] || IN_CLUSTER=1
 LOCATION=hel1
 NET=k3s-net
 NET_RANGE=10.0.0.0/16
@@ -37,7 +90,13 @@ NODE_PRIV_IP=10.0.0.3
 FW_PORTFOLIO=firewall-1
 FW_NODE=docling-node-fw
 SSH_KEY_NAME=portfolio-docling
-SSH_KEY=/root/.ssh/docling_node
+SSH_KEY=${DOCLING_SSH_KEY:-/root/.ssh/docling_node}
+# `bake` builds on a small x86 type: the snapshot inherits the build server's
+# disk size, and `up` can only boot it on types with at least that disk
+# (cx33 = 80 GB fits every candidate in NODE_TYPES).
+BAKE_TYPE=${DOCLING_BAKE_TYPE:-cx33}
+# Automatic re-bake (`tick`): at most this many attempts per pageindex sha.
+BAKE_MAX_ATTEMPTS=${DOCLING_BAKE_MAX_ATTEMPTS:-2}
 SNAP_SELECTOR=docling-node=snapshot
 ZONE=saliltrehan.com
 RECORD=docling
@@ -45,7 +104,18 @@ NS=pageindex-mcp
 HERE=$(cd "$(dirname "$0")" && pwd)
 K3S_DROPIN=/etc/rancher/k3s/config.yaml.d/20-private-net.yaml
 TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
+# A bake or up that dies after creating its server deletes it: it bills
+# hourly, and a half-built docling-1 left behind would also stop the next
+# tick's autostart (it sees the server) until the reaper got to it.
+BAKING=0
+STARTING=0
+trap 'rc=$?; if [ "$rc" != 0 ] && [ "$BAKING$STARTING" != 00 ]; then
+  what=bake; [ "$STARTING" = 1 ] && what=up
+  BAKING=0; STARTING=0; log "$what failed (exit $rc): deleting $NODE"; cmd_down || true; fi
+  rm -rf "$TMP"' EXIT
+# The controller's `timeout` sends TERM. Untrapped, bash still runs the EXIT
+# trap but with $? = 0, so the cleanup above would be skipped.
+trap 'exit 143' TERM
 
 DRY_RUN=0
 YES=0
@@ -107,8 +177,8 @@ wait_for() {  # wait_for SECONDS DESCRIPTION CMD...
   [ "$DRY_RUN" = 1 ] && { log "(dry-run) would wait for $what"; return 0; }
   local t=0
   until "$@" >/dev/null 2>&1; do
-    t=$((t+10)); [ "$t" -ge "$limit" ] && die "timed out after ${limit}s waiting for $what"
-    sleep 10
+    t=$((t+2)); [ "$t" -ge "$limit" ] && die "timed out after ${limit}s waiting for $what"
+    sleep 2
   done
   log "$what: ok"
 }
@@ -120,7 +190,7 @@ node_ready() { kubectl get node "$NODE" --no-headers 2>/dev/null | grep -qw Read
 ssh_node() {
   ssh -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new \
     -o UserKnownHostsFile="$TMP/known_hosts" -o LogLevel=ERROR \
-    -o ConnectTimeout=5 "root@$NODE_PRIV_IP" "$@"
+    -o IdentitiesOnly=yes -o ConnectTimeout=5 "root@$NODE_PRIV_IP" "$@"
 }
 
 rules_portfolio() {
@@ -206,17 +276,32 @@ cmd_bake() {
   exists_server "$NODE" && die "$NODE already exists; run '$0 down' first"
   exists_network "$NET" || die "run '$0 setup' first"
 
+  need ssh
+  # The controller gets the join token from Secret docling-node-bake.
+  local k3s_token=${DOCLING_K3S_TOKEN:-}
+  [ -n "$k3s_token" ] || k3s_token=$(cat /var/lib/rancher/k3s/server/node-token)
+  # A token from a Secret file keeps its trailing newline; sed would choke.
+  k3s_token=$(tr -d '\r\n' <<<"$k3s_token")
   local tmp=$TMP
   ( umask 077
-    sed -e "s|__K3S_NODE_TOKEN__|$(cat /var/lib/rancher/k3s/server/node-token)|" \
+    sed -e "s|__K3S_NODE_TOKEN__|$k3s_token|" \
         -e "s|__PAGEINDEX_SHA__|$sha|" \
         "$HERE/cloud-init-docling-agent.yaml" > "$tmp/user-data.yaml" )
 
-  log "Create $NODE ($NODE_TYPE, ubuntu-24.04) — billing starts"
-  run hcloud server create --name "$NODE" --type "$NODE_TYPE" --image ubuntu-24.04 \
-    --location "$LOCATION" --ssh-key "$SSH_KEY_NAME" --firewall "$FW_NODE" \
-    --label role=k3s-agent --label workload=docling \
-    --user-data-from-file "$tmp/user-data.yaml" --start-after-create=false
+  # First location with $BAKE_TYPE in stock (a create can fail on stock).
+  local loc created=
+  for loc in $NODE_LOCATIONS; do
+    log "Create $NODE ($BAKE_TYPE, ubuntu-24.04, $loc) — billing starts"
+    BAKING=1
+    if run hcloud server create --name "$NODE" --type "$BAKE_TYPE" --image ubuntu-24.04 \
+        --location "$loc" --ssh-key "$SSH_KEY_NAME" --firewall "$FW_NODE" \
+        --label role=k3s-agent --label workload=docling \
+        --user-data-from-file "$tmp/user-data.yaml" --start-after-create=false </dev/null; then
+      created=$loc; break
+    fi
+    exists_server "$NODE" && run hcloud server delete "$NODE"
+  done
+  [ -n "$created" ] || { BAKING=0; die "$BAKE_TYPE could not be created in any of [$NODE_LOCATIONS]"; }
   run hcloud server attach-to-network "$NODE" --network "$NET" --ip "$NODE_PRIV_IP"
   run hcloud server poweron "$NODE"
 
@@ -224,8 +309,9 @@ cmd_bake() {
   # anonymous rate limits. It goes over SSH into /run (tmpfs), not into
   # user-data, so it is never in the metadata service, /var/lib/cloud, or
   # the snapshot. The bake waits up to 10 min for it, then builds anonymously.
-  local hf
-  hf=$(kubectl -n "$NS" get secret pageindex-mcp-secrets \
+  # The controller gets it as env (optional secretKeyRef), not via the API.
+  local hf=${HF_TOKEN:-}
+  [ -n "$hf" ] || [ "$IN_CLUSTER" = 1 ] || hf=$(kubectl -n "$NS" get secret pageindex-mcp-secrets \
          -o jsonpath='{.data.HF_TOKEN}' 2>/dev/null | base64 -d 2>/dev/null || true)
   wait_for 300 "SSH on $NODE" ssh_node true
   if [ -n "$hf" ]; then
@@ -243,18 +329,24 @@ cmd_bake() {
   wait_for 300 "$NODE Ready" node_ready
 
   local tag="docling-service:${sha:0:7}"
-  log "Point both docling Deployments at $tag"
-  for d in docling-service docling-service-local; do
-    run kubectl -n "$NS" set image "deployment/$d" "docling-service=$tag"
-  done
+  # docling-service-local follows the GHCR tag (deploy.yml); only the
+  # docling-1 copy runs the baked image, and `up` re-pins it from the snapshot.
+  log "Point the docling-service Deployment at $tag"
+  run kubectl -n "$NS" set image deployment/docling-service "docling-service=$tag"
 
   log "Snapshot $NODE, then delete it"
   run hcloud server shutdown "$NODE"
   wait_for 180 "$NODE off" sh -c "hcloud server describe $NODE -o json | jq -e '.status==\"off\"'"
-  local old; old=$(newest_snapshot)
   run hcloud server create-image "$NODE" --type snapshot \
     --description "docling-node $tag" --label "$SNAP_SELECTOR" --label "pageindex-sha=${sha:0:7}"
-  [ -n "$old" ] && run hcloud image delete "$old"
+  # Keep the previous snapshot as a rollback (~EUR 0.11/month): `up` boots
+  # the newest; to roll back, delete the newest. Older ones go.
+  local old
+  for old in $(hcloud image list --type snapshot --selector "$SNAP_SELECTOR" -o json \
+      | jq -r 'sort_by(.created) | reverse | .[2:][] | .id'); do
+    run hcloud image delete "$old"
+  done
+  BAKING=0
   cmd_down
   log "bake done: '$0 up' boots from the new snapshot"
 }
@@ -281,26 +373,105 @@ size_pod_to_node() {
     --requests="cpu=${cpu_m}m,memory=${mem_mi}Mi" --limits="cpu=${cpu_m}m,memory=${mem_mi}Mi"
 }
 
+# "type location eur_per_h" lines, best first: in stock right now, x86, disk
+# >= the snapshot's, price <= MAX_EUR_H. Types outrank locations: a worse
+# type is tried only after the preferred one is out of stock everywhere.
+node_candidates() {  # node_candidates SNAPSHOT_DISK_GB
+  jq -rn --argjson st "$(hcloud server-type list -o json)" \
+    --argjson dc "$(hcloud datacenter list -o json)" \
+    --arg types "$NODE_TYPES" --arg locs "$NODE_LOCATIONS" \
+    --argjson cap "$MAX_EUR_H" --argjson disk "$1" '
+    ($locs | split(" ") | map(select(. != ""))) as $L
+    | $types | split(" ") | map(select(. != ""))[] as $t
+    | ($st[] | select(.name == $t)) as $s
+    | select($s.architecture == "x86" and $s.disk >= $disk)
+    | $L[] as $l
+    | ($s.prices[] | select(.location == $l) | .price_hourly.gross | tonumber) as $p
+    | select($p <= $cap)
+    | select(any($dc[]; .location.name == $l and (.server_types.available | index($s.id)) != null))
+    | "\($t) \($l) \($p * 10000 | round / 10000)"'
+}
+
+# Requests/limits for the pod, predicted from the server type so the pod can
+# be created before the node exists and schedule the moment it joins.
+# Allocatable measured 2026-09-26: cpx62 (32 GB) -> 30619Mi, cx33 (8 GB) ->
+# ~7014Mi; 90% of RAM less 512Mi stays under both. All cores are allocatable.
+predict_pod_size() {  # predict_pod_size TYPE -> "cpu_m mem_mi"
+  hcloud server-type describe "$1" -o json \
+    | jq -r '"\(.cores * 1000) \((.memory * 1024 * 0.9 - 512) | floor)"'
+}
+
+# ON_SERVER_CREATED (a command name, optional) runs each time `up` actually
+# creates a server -- the moment billing starts -- so `tick` counts autostarts
+# by money spent: a stock miss creates nothing and costs no quota, and an `up`
+# that dies after its create (the EXIT trap deletes the node) still counts.
+# Here, not after cmd_up returns: its failures exit the script.
+ON_SERVER_CREATED=
+server_created() {
+  [ "$DRY_RUN" = 1 ] || [ -z "$ON_SERVER_CREATED" ] || "$ON_SERVER_CREATED" \
+    || log "WARN: $ON_SERVER_CREATED failed after creating $NODE"
+}
+
 cmd_up() {
   exists_server "$NODE" && { log "$NODE already exists"; cmd_status; return; }
   local snap; snap=$(newest_snapshot)
   [ -n "$snap" ] || die "no snapshot labelled $SNAP_SELECTOR; run '$0 bake <sha>' first"
+  local snap_json; snap_json=$(hcloud image describe "$snap" -o json)
+  # Run the image baked into the snapshot (its description ends in the tag).
+  # A docling-service deploy dispatch can repoint the Deployment at a ghcr
+  # tag that was never pushed; the node would then sit in ImagePullBackOff.
+  local img; img=$(jq -r '.description | split(" ") | last' <<<"$snap_json")
+  [[ "$img" == docling-service:* ]] || die "snapshot $snap description has no docling-service:<tag>"
 
-  log "Create $NODE from snapshot $snap — billing starts"
-  run hcloud server create --name "$NODE" --type "$NODE_TYPE" --image "$snap" \
-    --location "$LOCATION" --ssh-key "$SSH_KEY_NAME" --firewall "$FW_NODE" \
-    --label role=k3s-agent --label workload=docling --start-after-create=false
+  local cands; cands=$(node_candidates "$(jq -r .disk_size <<<"$snap_json")")
+  [ -n "$cands" ] || die "no type in [$NODE_TYPES] is in stock in [$NODE_LOCATIONS] at <= EUR $MAX_EUR_H/h"
+  log "In stock, best first: $(tr '\n' ';' <<<"$cands")"
+
+  local type loc price created=
+  while read -r type loc price; do
+    # Create the pod first (Pending until the node joins), sized for this
+    # type, so it schedules the moment the node is Ready.
+    local size cpu_m mem_mi; size=$(predict_pod_size "$type"); read -r cpu_m mem_mi <<<"$size"
+    run kubectl -n "$NS" patch deployment/docling-service --type=strategic </dev/null -p "$(jq -nc \
+      --arg img "$img" --arg cpu "${cpu_m}m" --arg mem "${mem_mi}Mi" \
+      '{spec: {replicas: 1, template: {spec: {containers: [{name: "docling-service", image: $img,
+        resources: {requests: {cpu: $cpu, memory: $mem}, limits: {cpu: $cpu, memory: $mem}}}]}}}}')"
+    log "Create $NODE: $type in $loc (EUR $price/h) from snapshot $snap -- billing starts"
+    STARTING=1
+    # A type can sell out between the stock check and the create: move on.
+    if run hcloud server create --name "$NODE" --type "$type" --image "$snap" \
+        --location "$loc" --ssh-key "$SSH_KEY_NAME" --firewall "$FW_NODE" \
+        --label role=k3s-agent --label workload=docling --start-after-create=false </dev/null; then
+      server_created; created=$type; break
+    fi
+    log "create of $type in $loc failed; trying the next candidate"
+    # A half-failed create still left a server behind: its hour is billed.
+    exists_server "$NODE" && { server_created; run hcloud server delete "$NODE"; }
+  done <<<"$cands"
+  if [ -z "$created" ]; then
+    STARTING=0
+    run kubectl -n "$NS" scale deployment/docling-service --replicas=0
+    die "every in-stock candidate failed to create"
+  fi
+
   # Attach before the first boot: the snapshot's k3s config pins node-ip.
   run hcloud server attach-to-network "$NODE" --network "$NET" --ip "$NODE_PRIV_IP"
   run hcloud server poweron "$NODE"
   wait_for 300 "$NODE Ready" node_ready
-  size_pod_to_node
-  run kubectl -n "$NS" scale deployment/docling-service --replicas=1
   run kubectl uncordon "$NODE"
+  # The prediction is conservative; if the pod still cannot fit, size it to
+  # the node's real allocatable (this restarts the pod, ~20 s).
+  if [ "$DRY_RUN" != 1 ] && ! wait_for_scheduled 20; then
+    log "pod not schedulable with the predicted size; sizing to allocatable"
+    size_pod_to_node
+  fi
   run kubectl -n "$NS" rollout status deployment/docling-service --timeout=600s
+  # The pod is serving: from here a failure no longer deletes the node.
+  STARTING=0
   # traefik picks up the new endpoint a few seconds after the rollout: retry
   # the 503 for up to a minute, and warn rather than fail (the node is up).
-  if [ "$DRY_RUN" != 1 ]; then
+  # Skipped in the controller: failover routes to the pod IP, not the ingress.
+  if [ "$DRY_RUN" != 1 ] && [ "$IN_CLUSTER" = 0 ]; then
     local t=0
     until curl -fsS -m 10 "https://$RECORD.$ZONE/health"; do
       t=$((t+5)); [ "$t" -ge 60 ] && { log "WARN: https://$RECORD.$ZONE/health not answering yet"; break; }
@@ -308,10 +479,25 @@ cmd_up() {
     done
     echo
   fi
-  log "up. Remember '$0 down' when done: $NODE bills hourly while it exists."
+  if [ "$IN_CLUSTER" = 1 ] || systemctl is-active --quiet "$REAPER_UNIT.timer"; then
+    log "up ($created). The reaper deletes $NODE near the end of each billed hour unless it is converting (max $MAX_HOURS h)."
+  else
+    log "up ($created). WARN: reaper timer is off ('$0 reaper on'); run '$0 down' when done -- $NODE bills hourly."
+  fi
+}
+
+wait_for_scheduled() {  # wait_for_scheduled SECONDS
+  local t=0
+  until kubectl -n "$NS" get pods -l app=docling-service,copy=node -o json \
+      | jq -e '[.items[] | select(.spec.nodeName == "'"$NODE"'")] | length > 0' >/dev/null; do
+    t=$((t+2)); [ "$t" -ge "$1" ] && return 1
+    sleep 2
+  done
 }
 
 cmd_down() {
+  # Send new conversions back to the Mac before the node goes away.
+  route_active mac
   # 0 at rest, so no Pending pod holds the node's full request meanwhile.
   run kubectl -n "$NS" scale deployment/docling-service --replicas=0
   if node_ready || kubectl get node "$NODE" >/dev/null 2>&1; then
@@ -331,8 +517,8 @@ cmd_down() {
 
 cmd_status() {
   if exists_server "$NODE"; then
-    hcloud server describe "$NODE" -o json | jq -r \
-      '"server: \(.name) \(.server_type.name) \(.status) created \(.created)  (EUR 0.0144/h for cx33 while it exists)"'
+    hcloud server describe "$NODE" -o json | jq -r '.datacenter.location.name as $loc |
+      "server: \(.name) \(.server_type.name) \(.status) created \(.created)  (EUR \(.server_type.prices[] | select(.location == $loc) | .price_hourly.gross | tonumber * 10000 | round / 10000)/h while it exists)"'
   else
     echo "server: $NODE absent (not billing)"
   fi
@@ -341,6 +527,241 @@ cmd_status() {
   hcloud image list --type snapshot --selector "$SNAP_SELECTOR" -o json | jq -r \
     '.[] | "snapshot: \(.id) \(.description) \(.image_size // 0 | . * 100 | round / 100) GB  (~EUR \(.image_size // 0 | . * 0.0143 * 100 | round / 100)/month)"'
   hcloud server describe "$PORTFOLIO" -o json | jq -r '"portfolio: \(.server_type.name) (\(.server_type.memory) GB)"'
+}
+
+# Summed CPU in millicores of the docling-service pods on docling-1: 0 when
+# none runs there, "unknown" when one does but its CPU cannot be read (API
+# error, metrics-server not scraped it yet). A failed read must not look idle,
+# or the reaper deletes a node mid-conversion. copy=node only: the portfolio
+# copy (copy=local) must not keep docling-1 alive. kubectl top prints "1234m"
+# or whole cores ("2").
+docling_mcpu() {
+  local pods top
+  pods=$(kubectl -n "$NS" get pods -l app=docling-service,copy=node -o json 2>/dev/null \
+    | jq -r --arg n "$NODE" '.items[] | select(.spec.nodeName == $n) | .metadata.name') \
+    || { echo unknown; return; }
+  [ -n "$pods" ] || { echo 0; return; }
+  top=$(kubectl top pod -n "$NS" -l app=docling-service,copy=node --no-headers 2>/dev/null) \
+    || { echo unknown; return; }
+  # Every pod on docling-1 needs a sample; a missing one is not a zero.
+  awk -v want="$(tr '\n' ' ' <<<"$pods")" '
+    BEGIN {n=split(want, w, " "); for (i=1; i<=n; i++) need[w[i]]=1}
+    ($1 in need) {c=$2; if (c ~ /m$/) {sub(/m$/, "", c)} else {c=c*1000}; s+=c; delete need[$1]}
+    END {for (p in need) {print "unknown"; exit} print s+0}' <<<"$top"
+}
+
+cmd_reap() {
+  exists_server "$NODE" || return 0
+  local age_min into_hour billed cpu
+  # In jq, not date -d: the controller image's busybox date cannot parse it.
+  age_min=$(hcloud server describe "$NODE" -o json | jq -r '
+    (now - (.created | sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z") | fromdateiso8601)) / 60 | floor')
+  into_hour=$(( age_min % 60 ))
+  billed=$(( age_min / 60 + 1 ))
+  # Any age from the last margin of the final allowed hour onwards, so a
+  # missed tick (host reboot, API error) cannot let the node outlive the cap.
+  if [ "$age_min" -ge $(( MAX_HOURS * 60 - REAP_MARGIN_MIN )) ]; then
+    log "reap: $NODE is ${age_min} min old, hour $billed of max $MAX_HOURS -- deleting even if busy"
+    cmd_down
+    return
+  fi
+  if [ "$into_hour" -lt $(( 60 - REAP_MARGIN_MIN )) ]; then
+    log "reap: $NODE ${age_min} min old (billed hour $billed, ${into_hour} min in) -- keep"
+    return 0
+  fi
+  cpu=$(docling_mcpu)
+  if [ "$cpu" = unknown ]; then
+    log "reap: $NODE CPU unreadable near the end of hour $billed -- keeping it (the $MAX_HOURS h cap still applies)"
+    return 0
+  fi
+  if [ "$cpu" -ge "$BUSY_MCPU" ]; then
+    log "reap: $NODE busy (${cpu}m CPU) near the end of hour $billed -- keeping it for hour $(( billed + 1 ))"
+    return 0
+  fi
+  log "reap: $NODE idle (${cpu}m CPU), ${into_hour} min into billed hour $billed -- deleting"
+  cmd_down
+}
+
+# ---- failover: docling-active routing + autostart --------------------------
+
+# "addr port" of the Mac, from its EndpointSlice (the one place it is written).
+mac_endpoint() {
+  kubectl -n "$NS" get endpointslice "$MAC_SLICE" -o json \
+    | jq -r '"\(.endpoints[0].addresses[0]) \(.ports[0].port)"'
+}
+mac_ok() {
+  local addr port; read -r addr port <<<"$(mac_endpoint)"
+  curl -fsS -m 5 -o /dev/null "http://$addr:$port/health"
+}
+# IP of a Ready docling-service pod on docling-1, or empty.
+node_pod_ip() {
+  kubectl -n "$NS" get pods -l app=docling-service,copy=node -o json | jq -r '
+    [.items[] | select(any(.status.conditions[]?; .type == "Ready" and .status == "True"))
+     | .status.podIP] | first // empty'
+}
+
+# Point docling-active (what the worker calls) at the Mac or docling-1's pod.
+route_active() {  # route_active mac|node
+  local addr port want cur
+  if [ "$1" = node ]; then
+    addr=$(node_pod_ip); port=8080
+    [ -n "$addr" ] || { log "route: no Ready pod on $NODE; leaving routing as is"; return 0; }
+  else
+    read -r addr port <<<"$(mac_endpoint)"
+  fi
+  want="$addr:$port"
+  cur=$(kubectl -n "$NS" get endpointslice "$ACTIVE_SLICE" -o json 2>/dev/null \
+    | jq -r '"\(.endpoints[0].addresses[0]):\(.ports[0].port)"' || true)
+  [ "$cur" = "$want" ] && return 0
+  log "route: $ACTIVE_SVC -> $1 ($want, was ${cur:-unset})"
+  [ "$DRY_RUN" = 1 ] && return 0
+  kubectl apply -f - >/dev/null <<EOF
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: $ACTIVE_SLICE
+  namespace: $NS
+  labels:
+    kubernetes.io/service-name: $ACTIVE_SVC
+    endpointslice.kubernetes.io/managed-by: docling-node-tick
+addressType: IPv4
+ports:
+  - name: http
+    port: $port
+    protocol: TCP
+endpoints:
+  - addresses: ["$addr"]
+EOF
+}
+
+# Conversion demand: queued arq jobs + running ones (arq's own cron excluded).
+# Raw RESP over /dev/tcp: no redis-cli on the host.
+demand() {
+  local ip out
+  ip=$(kubectl -n "$REDIS_NS" get svc "$REDIS_SVC" -o jsonpath='{.spec.clusterIP}')
+  out=$(timeout 5 bash -c "exec 3<>/dev/tcp/$ip/6379
+    printf 'SELECT $REDIS_DB\r\nZCARD arq:queue\r\nKEYS arq:in-progress:*\r\nQUIT\r\n' >&3
+    cat <&3" 2>/dev/null | tr -d '\r') || true
+  local queued running
+  queued=$(awk '/^:/ {sub(/^:/, ""); print; exit}' <<<"$out")
+  running=$(grep '^arq:in-progress:' <<<"$out" | grep -vc ':cron:' || true)
+  echo $(( ${queued:-0} + ${running:-0} ))
+}
+
+# Controller state that must survive a pod restart, in ConfigMap
+# docling-node-state: autostarts-<date> (the daily cap), bake-want (the
+# pageindex sha deploy.yml asks to bake) and bake-tries-<sha>.
+state_get() {  # state_get KEY -> value or empty
+  kubectl -n "$NS" get configmap "$STATE_CM" -o json 2>/dev/null \
+    | jq -r --arg k "$1" '.data[$k] // empty' || true
+}
+state_set() {  # state_set KEY VALUE; drops autostarts-* keys of other days
+  # The patch is a JSON merge patch (--type merge): keys it leaves out are
+  # kept as they are, so bake-want and bake-tries-* survive. It carries only
+  # KEY and a null for each autostarts-* key of another day (null deletes).
+  # --dry-run must leave the counters the real tick decides on untouched.
+  [ "$DRY_RUN" = 1 ] && { printf '  + state_set %s %s\n' "$1" "$2" >&2; return 0; }
+  kubectl -n "$NS" create configmap "$STATE_CM" >/dev/null 2>&1 || true
+  local cur; cur=$(kubectl -n "$NS" get configmap "$STATE_CM" -o json | jq -c '.data // {}')
+  kubectl -n "$NS" patch configmap "$STATE_CM" --type merge -p "$(jq -nc \
+    --argjson cur "$cur" --arg k "$1" --arg v "$2" --arg today "autostarts-$(date -u +%F)" \
+    '{data: (($cur | with_entries(select(.key | startswith("autostarts-")) | select(.key != $today)
+      | .value = null)) + {($k): $v})}')" >/dev/null
+}
+autostarts_today() { local n; n=$(state_get "autostarts-$(date -u +%F)"); echo "${n:-0}"; }
+record_autostart() { state_set "autostarts-$(date -u +%F)" $(( $(autostarts_today) + 1 )); }
+
+# Re-bake when deploy.yml has recorded a newer docling-service build than the
+# snapshot's. Only while nothing else needs the node: the Mac answers, no
+# docling-1 exists. The bake holds the tick's lock (~20-30 min), so failover
+# is paused meanwhile; a Mac that fails first delays the bake instead.
+maybe_bake() {
+  local want have tries
+  want=$(state_get bake-want)
+  [ -n "$want" ] || return 0
+  have=$(hcloud image list --type snapshot --selector "$SNAP_SELECTOR" -o json \
+    | jq -r 'sort_by(.created) | last | .labels["pageindex-sha"] // empty')
+  [ "${want:0:7}" != "$have" ] || return 0
+  exists_server "$NODE" && return 0
+  tries=$(state_get "bake-tries-${want:0:7}"); tries=${tries:-0}
+  if [ "$tries" -ge "$BAKE_MAX_ATTEMPTS" ]; then
+    log "tick: bake of ${want:0:7} failed $tries times -- not retrying (snapshot stays ${have:-none})"
+    return 0
+  fi
+  state_set "bake-tries-${want:0:7}" $(( tries + 1 ))
+  log "tick: snapshot is ${have:-none}, docling-service ${want:0:7} was built -- baking (attempt $(( tries + 1 ))/$BAKE_MAX_ATTEMPTS)"
+  cmd_bake "$want"
+}
+
+cmd_tick() {
+  # --dry-run reads the probe counter to show the decision but never writes
+  # it: the real timer's failover depends on it.
+  local fails=0
+  if mac_ok; then
+    [ "$DRY_RUN" = 1 ] || { mkdir -p "$STATE_DIR"; echo 0 >"$STATE_DIR/mac-fails"; }
+  else
+    fails=$(( $(cat "$STATE_DIR/mac-fails" 2>/dev/null || echo 0) + 1 ))
+    [ "$DRY_RUN" = 1 ] || { mkdir -p "$STATE_DIR"; echo "$fails" >"$STATE_DIR/mac-fails"; }
+  fi
+
+  if [ "$fails" -eq 0 ]; then
+    route_active mac
+  elif [ -n "$(node_pod_ip)" ]; then
+    route_active node
+  elif [ "$fails" -ge "$MAC_FAILS" ] && [ "$AUTOSTART" = 1 ] && ! exists_server "$NODE"; then
+    local d; d=$(demand)
+    if [ "$d" -gt 0 ]; then
+      local n; n=$(autostarts_today)
+      if [ "$n" -ge "$AUTOSTART_MAX_PER_DAY" ]; then
+        log "tick: Mac down ($fails probes), $d job(s) waiting, but $n autostarts today (max $AUTOSTART_MAX_PER_DAY) -- not starting"
+      else
+        log "tick: Mac down ($fails probes) and $d job(s) waiting -- starting $NODE ($n/$AUTOSTART_MAX_PER_DAY autostarts today; counted when a server is created)"
+        ON_SERVER_CREATED=record_autostart
+        cmd_up
+        ON_SERVER_CREATED=
+        route_active node
+      fi
+    fi
+  fi
+  cmd_reap
+  [ "$fails" -ne 0 ] || maybe_bake
+}
+
+cmd_reaper() {
+  local unit=/etc/systemd/system/$REAPER_UNIT
+  case "${1:-}" in
+    on)
+      [ "$DRY_RUN" = 1 ] || {
+        cat >"$unit.service" <<EOF
+[Unit]
+Description=docling node failover + spot-style reaper ($NODE)
+
+[Service]
+Type=oneshot
+Environment=HOME=/root
+Environment=KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+TimeoutStartSec=20min
+ExecStart=$HERE/docling-node.sh tick
+EOF
+        cat >"$unit.timer" <<EOF
+[Unit]
+Description=Run the docling node tick (failover + reaper) every 30 seconds
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=30s
+AccuracySec=15s
+
+[Install]
+WantedBy=timers.target
+EOF
+      }
+      run systemctl daemon-reload
+      run systemctl enable --now "$REAPER_UNIT.timer"
+      ;;
+    off) run systemctl disable --now "$REAPER_UNIT.timer" ;;
+    *) die "usage: $0 reaper on|off" ;;
+  esac
 }
 
 cmd_local() {
@@ -366,6 +787,35 @@ cmd_local() {
   esac
 }
 
+# A host timer from before the in-cluster controller retires itself once the
+# controller is running, so exactly one tick loop drives docling-1.
+case "${1:-}" in
+  tick|reap)
+    if [ "$IN_CLUSTER" = 0 ] && [ "$(kubectl -n "$NS" get deployment "$CONTROLLER" \
+         -o jsonpath='{.status.readyReplicas}' 2>/dev/null)" = 1 ]; then
+      log "$CONTROLLER runs $1 in the cluster; disabling the host timer $REAPER_UNIT.timer"
+      [ "$DRY_RUN" = 1 ] || systemctl disable --now "$REAPER_UNIT.timer" 2>/dev/null || true
+      exit 0
+    fi ;;
+esac
+
+# One mutating command at a time: the timer's tick skips its turn while a
+# manual up/down (or a long autostart) holds the lock.
+case "${1:-}" in
+  up|down|reap|tick)
+    mkdir -p "$(dirname "$LOCK")"
+    exec 9>"$LOCK"
+    # Polled, not `flock -w`: the controller image's busybox flock has no -w.
+    if [ "$1" = tick ]; then flock -n 9 || exit 0
+    else
+      t=0
+      until flock -n 9; do
+        t=$((t+2)); [ "$t" -ge 900 ] && die "lock busy: $LOCK"
+        sleep 2
+      done
+    fi ;;
+esac
+
 case "${1:-}" in
   setup) cmd_setup ;;
   bake) shift; cmd_bake "$@" ;;
@@ -373,5 +823,8 @@ case "${1:-}" in
   down) cmd_down ;;
   status) cmd_status ;;
   local) shift; cmd_local "$@" ;;
-  *) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+  reap) cmd_reap ;;
+  tick) cmd_tick ;;
+  reaper) shift; cmd_reaper "$@" ;;
+  *) sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

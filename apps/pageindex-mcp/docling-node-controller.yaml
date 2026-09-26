@@ -1,0 +1,229 @@
+# docling-node-controller: runs `docling-node.sh tick` every 30 s inside the
+# cluster (Mac/docling-1 failover routing, autostart, spot-style reaper).
+# It owns docling-1 and the docling-active EndpointSlice; the old host timer
+# docling-node-reaper.timer on portfolio is only a fallback that disables
+# itself once this Deployment is Ready. Merging to main is all it takes:
+# deploy.yml publishes the script as ConfigMap docling-node-script and applies
+# this file on every push. The script is copied before each run, so a new
+# version takes effect on the next tick (the ConfigMap volume syncs in ~1 min).
+#
+# One-time, out of band (never committed):
+#   kubectl -n pageindex-mcp create secret generic docling-node-hcloud \
+#     --from-literal=token=<Hetzner Cloud project API token>
+#   kubectl -n pageindex-mcp create secret generic docling-node-bake \
+#     --from-file=ssh-key=/root/.ssh/docling_node \
+#     --from-file=k3s-token=/var/lib/rancher/k3s/server/node-token
+# The bake (automatic re-bake of the docling-1 snapshot) needs the second one:
+# the k3s join token for the build server's user-data, and the SSH key that
+# hands it HF_TOKEN over the private network.
+#
+# RBAC, least privilege. Cluster-wide: read nodes; patch/update/delete ONLY
+# the Node docling-1 (`up` uncordons it, `down` cordons, drains and deletes
+# it); pod listing across namespaces and daemonset/replicaset/statefulset
+# lookups (what `kubectl drain` reads); metrics for the busy check; the
+# redis Service in infra. Namespaced to pageindex-mcp: pods/eviction (drain
+# only ever evicts docling-service: docling-1 is tainted dedicated=docling
+# and nothing outside pageindex-mcp tolerates it except DaemonSets, which
+# drain skips), scale/patch docling-service, write the docling-active
+# EndpointSlice and the docling-node-state ConfigMap.
+# The ServiceAccount does not automount its token; only the controller pod
+# opts in, so another pod naming this SA gets no API credentials.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: docling-node-controller
+  namespace: pageindex-mcp
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: docling-node-controller
+rules:
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list, watch]
+  # resourceNames must match the script's NODE (docling-node.sh).
+  - apiGroups: [""]
+    resources: [nodes]
+    resourceNames: [docling-1]
+    verbs: [patch, update, delete]
+  - apiGroups: [""]
+    resources: [pods, services]
+    verbs: [get, list, watch]
+  - apiGroups: [apps]
+    resources: [daemonsets, replicasets, statefulsets]
+    verbs: [get, list]
+  - apiGroups: [metrics.k8s.io]
+    resources: [pods]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: docling-node-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: docling-node-controller
+subjects:
+  - kind: ServiceAccount
+    name: docling-node-controller
+    namespace: pageindex-mcp
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: docling-node-controller
+  namespace: pageindex-mcp
+rules:
+  - apiGroups: [apps]
+    resources: [deployments, deployments/scale]
+    verbs: [get, list, watch, patch, update]
+  - apiGroups: [discovery.k8s.io]
+    resources: [endpointslices]
+    verbs: [get, list, create, patch, update]
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, create, patch, update]
+  - apiGroups: [""]
+    resources: [pods/eviction]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: docling-node-controller
+  namespace: pageindex-mcp
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: docling-node-controller
+subjects:
+  - kind: ServiceAccount
+    name: docling-node-controller
+    namespace: pageindex-mcp
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: docling-node-controller
+  namespace: pageindex-mcp
+  labels:
+    app: docling-node-controller
+spec:
+  replicas: 1
+  # Never two tick loops at once (the lock is per pod).
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: docling-node-controller
+  template:
+    metadata:
+      labels:
+        app: docling-node-controller
+    spec:
+      serviceAccountName: docling-node-controller
+      # The SA does not automount; this pod is the one that needs the token.
+      automountServiceAccountToken: true
+      # Never on the node it deletes.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: workload
+                    operator: NotIn
+                    values: [docling]
+      initContainers:
+        - name: hcloud
+          image: alpine/k8s:1.34.11
+          command:
+            - sh
+            - -ec
+            - |
+              cd /tmp
+              curl -fsSLo hcloud.tgz \
+                https://github.com/hetznercloud/cli/releases/download/v1.69.0/hcloud-linux-amd64.tar.gz
+              echo "aca1a346c8d218a094f1811ee1705013d394cabf48e40887292caff464b64277  hcloud.tgz" | sha256sum -c -
+              tar -xzf hcloud.tgz -C /tools hcloud
+              /tools/hcloud version
+          volumeMounts:
+            - name: tools
+              mountPath: /tools
+      containers:
+        - name: tick
+          image: alpine/k8s:1.34.11
+          command:
+            - bash
+            - -c
+            - |
+              # ssh for `bake` (hands HF_TOKEN to the build server).
+              apk add --no-cache -q openssh-client-default \
+                || echo "openssh-client unavailable: automatic re-bake disabled"
+              while :; do
+                cp /script/docling-node.sh /script/cloud-init-docling-agent.yaml /state/
+                # 90m: a tick that re-bakes waits up to 45 min for the build.
+                timeout 90m bash /state/docling-node.sh tick || echo "tick exited $?"
+                sleep 30
+              done
+          env:
+            - name: PATH
+              value: /tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+            - name: HOME
+              value: /state
+            - name: DOCLING_STATE_DIR
+              value: /state
+            - name: DOCLING_LOCK
+              value: /state/lock
+            - name: HCLOUD_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: docling-node-hcloud
+                  key: token
+            - name: DOCLING_K3S_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: docling-node-bake
+                  key: k3s-token
+                  optional: true
+            - name: DOCLING_SSH_KEY
+              value: /bake/ssh-key
+            # Model download during bake; anonymous (rate-limited) when unset.
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: pageindex-mcp-secrets
+                  key: HF_TOKEN
+                  optional: true
+          resources:
+            requests:
+              cpu: 10m
+              memory: 48Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts:
+            - name: script
+              mountPath: /script
+            - name: state
+              mountPath: /state
+            - name: tools
+              mountPath: /tools
+            - name: bake
+              mountPath: /bake
+              readOnly: true
+      volumes:
+        - name: script
+          configMap:
+            name: docling-node-script
+        - name: state
+          emptyDir: {}
+        - name: tools
+          emptyDir: {}
+        - name: bake
+          secret:
+            secretName: docling-node-bake
+            defaultMode: 0400
+            optional: true

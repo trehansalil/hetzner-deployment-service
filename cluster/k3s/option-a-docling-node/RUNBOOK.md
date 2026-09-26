@@ -1,11 +1,11 @@
-# On-demand docling node (`docling-1`, cx33)
+# On-demand docling node (`docling-1`, cpx62, spot-style)
 
 **Status (2026-09-25):** set up and verified. Snapshot of `docling-service:38835af` baked (auto-sized parallel chunks); `up` → HTTPS health, 401 without token, egress lock → `down` all checked. docling-1 is down (no server billing).
 Chosen over resizing portfolio (cx series out of stock for migration; a resize
 is a power-off). Scheduled cx33↔cx43 resizing is on hold — see
 [Option B rescale](../OPTION-B-RESCALE.md).
 
-`docling-1` is a second Hetzner Cloud server (cx33: 4 vCPU / 8 GB, hel1; `DOCLING_NODE_TYPE` overrides). It
+`docling-1` is a second Hetzner Cloud server (cpx62: 16 shared vCPU / 32 GB, hel1, since 2026-09-26; was cx33; `DOCLING_NODE_TYPE` overrides). It
 joins the portfolio k3s cluster as an agent over a private network, runs only
 docling-service, and exists only while you need it. `docling-node.sh` drives
 everything; every mutating step accepts `--dry-run`.
@@ -25,7 +25,7 @@ everything; every mutating step accepts `--dry-run`.
 
 | Item | When billed | Price |
 |---|---|---|
-| `docling-1` cx33 + primary IPv4 | while the server **exists** (off still bills) | €0.0136 + €0.0008 = **€0.0144/h** |
+| `docling-1` cpx62 + primary IPv4 | every **started** hour while the server exists (off still bills) | €0.2083 + €0.0008 = **€0.2091/h**, max 3 h (€0.63) per `up` under the reaper |
 | docling snapshot | while kept | €0.0143/GB/month (~8–12 GB → ~€0.15/mo) |
 | private network, firewalls, DNS record | — | free |
 
@@ -33,7 +33,8 @@ everything; every mutating step accepts `--dry-run`.
 
 | File | Purpose |
 |---|---|
-| `docling-node.sh` | `setup`, `bake`, `up`, `down`, `status`, `local on\|off` |
+| `docling-node.sh` | `setup`, `bake`, `up`, `down`, `status`, `local on\|off`, `tick`, `reap` |
+| `apps/pageindex-mcp/docling-node-controller.yaml` | in-cluster loop running `tick` every 30 s, with its RBAC |
 | `server-private-net.yaml` | k3s drop-in for portfolio: node-ip/flannel on the private NIC, public IP kept as ExternalIP and cert SAN |
 | `cloud-init-docling-agent.yaml` | first-boot user-data for `bake`: joins as agent, builds the image from the public repo, imports it into containerd, removes docker |
 | `apps/pageindex-mcp/docling-service-deployment.yaml` | two Deployments behind one Service: `docling-service` (pinned to docling-1) and `docling-service-local` (portfolio, replicas 0) |
@@ -75,26 +76,46 @@ kubectl apply -n pageindex-mcp -f apps/pageindex-mcp/service.yaml \
 
 `docling-service` sits at 0 replicas until `up` sizes it to docling-1 and scales it to 1; `down` scales it back to 0.
 
-## 2. Bake the image (once per docling-service version)
+## 2. Bake the image (automatic)
 
-```bash
-./docling-node.sh bake <full pageindex commit sha>
-```
+Every docling-service build on pageindex `master` re-bakes the docling-1 snapshot
+with nothing run by hand:
 
-Creates docling-1 from ubuntu-24.04, builds `services/docling-service/Dockerfile`
-at that commit **on the node** (~15–30 min on 2 vCPU), imports the image into
-the agent's containerd as `docling-service:<sha7>`, points both Deployments at
-it, snapshots the server (label `docling-node=snapshot`, older one deleted) and
-deletes the server. No registry or pull secret is involved.
+1. `build-push-docling-service.yml` (pageindex) runs the quality gates, pushes the
+   GHCR image and dispatches `docling-service-image-updated` with `sha-<sha>`.
+2. `deploy.yml` moves `docling-service-local` to that GHCR tag and records the sha
+   as `bake-want` in ConfigMap `docling-node-state`.
+3. On its next tick with the Mac healthy and no docling-1, `docling-node-controller`
+   sees the newest snapshot's `pageindex-sha` label differs and runs `bake <sha>`.
+   At most `DOCLING_BAKE_MAX_ATTEMPTS` (2) tries per sha (`bake-tries-<sha7>`).
 
-The model download uses `HF_TOKEN` from `pageindex-mcp-secrets` when it is
-set (anonymous otherwise, which is slower and rate-limited). `bake` hands it to
-the node over SSH on the private network into `/run/hf_token` (tmpfs), and the
-Dockerfile reads it as a BuildKit secret: it is not in user-data, the image
-layers or the snapshot. The running service never needs it (models are baked
-in, runtime is offline). Once
-`build-push-docling-service.yml` publishes to GHCR from master, the deploy
-workflow switches the Deployments to the GHCR tag instead.
+`bake` creates docling-1 as a **cx33** (`DOCLING_BAKE_TYPE`; its 80 GB disk
+becomes the snapshot's minimum, which every `up` candidate has) in the first of
+hel1/fsn1/nbg1 that works, builds `services/docling-service/Dockerfile` at that
+commit **on the node** (~15–30 min), imports it into containerd as
+`docling-service:<sha7>`, snapshots the server (label `docling-node=snapshot`,
+`pageindex-sha=<sha7>`) and deletes the server. A bake that fails part-way deletes
+its server. The previous snapshot is kept as a rollback; older ones are deleted.
+Cost: about EUR 0.01 of cx33 time per bake.
+
+While a bake runs (it holds the tick lock) failover is paused; a Mac outage that
+starts first delays the bake instead. Watch it with
+`kubectl -n pageindex-mcp logs deploy/docling-node-controller -c tick -f`.
+
+**Roll back** to the previous snapshot: delete the newest
+(`hcloud image list --selector docling-node=snapshot`), and stop the tick from
+re-baking it: `kubectl -n pageindex-mcp patch configmap docling-node-state --type merge -p '{"data":{"bake-tries-<sha7>":"99"}}'`.
+**Bake by hand** (any sha): `./docling-node.sh bake <full pageindex sha>`, or run the
+deploy workflow for `docling-service` with image tag `sha-<full sha>`.
+
+The model download uses `HF_TOKEN` (the controller gets it from `pageindex-mcp-secrets`
+as env) when set, anonymous otherwise. `bake` hands it to the node over SSH on the
+private network into `/run/hf_token` (tmpfs); the Dockerfile reads it as a BuildKit
+secret, so it is not in user-data, the image layers or the snapshot. The controller's
+SSH key and the k3s join token come from the one-time Secret `docling-node-bake`
+(see `docling-node-controller.yaml`). The running service never needs HF_TOKEN
+(models are baked in, runtime is offline). docling-1 always runs the image baked
+into its snapshot (`up` pins it); only `docling-service-local` follows GHCR.
 
 ## 3. Day to day
 
@@ -103,6 +124,97 @@ workflow switches the Deployments to the GHCR tag instead.
 ./docling-node.sh status   # server, node, pods, snapshot size and cost
 ./docling-node.sh down     # drain, delete node + server; billing stops
 ```
+
+### Spot-style reaper (2026-09-26)
+
+The Mac mini (`docling-service-mac`) is the primary converter; `docling-1` is a
+standby you start for a burst of work and that removes itself. Hetzner bills
+every started hour from creation, so the reaper deletes the node just before an
+hour ends:
+
+- The **`docling-node-controller`** Deployment (`apps/pageindex-mcp/docling-node-controller.yaml`,
+  on portfolio) runs `docling-node.sh tick` every 30 s (failover, then `reap`).
+- In the last 8 min of each billed hour: `down` if the docling pod is idle; if it
+  is converting (≥500m CPU) keep it for the next hour.
+- After 3 billed hours: `down` even if busy — a conversion in flight fails.
+- Knobs: `DOCLING_REAP_MARGIN_MIN` (8), `DOCLING_BUSY_MCPU` (500), `DOCLING_MAX_HOURS` (3),
+  and the autostart ones below: add them to the controller's `env:` and merge.
+- `kubectl -n pageindex-mcp logs deploy/docling-node-controller -c tick` shows every decision
+  (a healthy Mac with no node logs nothing).
+
+#### Fully automatic from main
+
+Every push to `main` that touches `apps/pageindex-mcp/` or this directory runs the
+deploy workflow, which publishes `docling-node.sh` as ConfigMap `docling-node-script`,
+applies the controller, and restarts server + worker if `configmap.yaml` changed. The
+controller copies the script before each tick, so a script change is live about a
+minute after the ConfigMap syncs. Nothing is run by hand on portfolio.
+
+One-time prerequisites (done 2026-09-26), never committed:
+
+```bash
+kubectl -n pageindex-mcp create secret generic docling-node-hcloud --from-literal=token=<token>
+kubectl -n pageindex-mcp create secret generic docling-node-bake \
+  --from-file=ssh-key=/root/.ssh/docling_node \
+  --from-file=k3s-token=/var/lib/rancher/k3s/server/node-token
+```
+
+The controller's image is `alpine/k8s` (kubectl, jq, curl, busybox); hcloud v1.69.0 is
+downloaded and checksum-verified by an initContainer. RBAC: cluster-wide node reads,
+patch/delete of the Node `docling-1` only (`resourceNames`), pod and workload reads for
+`drain`, metrics for the busy check; namespaced (pageindex-mcp) pod eviction, patch/scale
+of Deployments, the `docling-active` EndpointSlice, and ConfigMap `docling-node-state`
+(the daily autostart count, so a pod restart cannot reset the cap). The ServiceAccount
+does not automount its token; only the controller pod opts in.
+
+Manual commands still work from portfolio or inside the pod
+(`kubectl -n pageindex-mcp exec deploy/docling-node-controller -c tick -- bash /state/docling-node.sh status`);
+they share the tick's lock. The old host timer (`reaper on|off`) is a fallback only: it
+disables itself as soon as the controller is Ready.
+
+### Failover and autostart (2026-09-26)
+
+The worker converts via **`docling-active:8090`** (`apps/pageindex-mcp/docling-active.yaml`), a
+selector-less Service with one endpoint that `docling-node.sh tick` rewrites every 30 s:
+
+| Mac `/health` | docling-1 pod | Jobs queued/running | `tick` does |
+|---|---|---|---|
+| ok | any | any | route → Mac |
+| failing | Ready | any | route → docling-1 pod |
+| failing ≥ 2 probes (~1 min) | absent | > 0 | **autostart** `up`, then route → docling-1 |
+| failing | absent | 0 | nothing (no spend without work) |
+
+- Autostart is capped at `DOCLING_AUTOSTART_MAX_PER_DAY` (6); `DOCLING_AUTOSTART=0` disables it.
+- The worker's `CONVERTER_TRANSIENT_RETRY_COUNT=3` keeps retrying a dead Mac (~135 s per attempt)
+  for ~9 min, longer than detection + bring-up, so an in-flight conversion lands on docling-1
+  instead of degrading to the legacy text-layer path.
+- When the Mac answers again, new conversions go back to it at once; docling-1 is reaped at
+  the end of its billed hour once idle.
+- A deploy re-applies `docling-active.yaml` (routing → Mac); the next tick corrects it within 30 s.
+  While docling-1 exists the deploy workflow leaves the `docling-service` Deployment alone.
+
+### Picking a server by stock (2026-09-26)
+
+`up` asks Hetzner what is in stock and takes the first match:
+
+- types in order `DOCLING_NODE_TYPES` (`cpx62 ccx33 cpx52 ccx43 cpx42 cx43`), each tried in
+  `DOCLING_NODE_LOCATIONS` (`hel1 fsn1 nbg1`) before the next type;
+- x86, disk ≥ the snapshot's, price ≤ `DOCLING_MAX_EUR_H` (0.50);
+- a create that fails (sold out since the check) moves on to the next candidate.
+
+All three locations share k3s-net's `eu-central` zone. `DOCLING_NODE_TYPE` pins one type.
+
+### Start-up time
+
+Measured 2026-09-26 on cpx62: ~90 s from create to Ready (64 s of it VM boot + k3s join).
+`up` now creates the pod before the node exists, sized from the server type (90 % of RAM
+less 512 Mi, all cores), so it schedules the instant the node joins. If it does not fit, `up`
+re-sizes it to the node's real allocatable. Node polling and the startup probe run every 2 s
+(were 10 s). The VM boot itself is Hetzner's and stays ~30-40 s.
+
+`up` sets the Deployment image to the `docling-service:<tag>` in the snapshot's
+description, so a stray ghcr tag (a `docling-service` deploy dispatch) cannot
+leave the pod in ImagePullBackOff.
 
 While up, `https://docling.saliltrehan.com` answers from anywhere with
 `Authorization: Bearer <DOCLING_SERVICE_BEARER_TOKEN from pageindex-mcp-secrets>`.

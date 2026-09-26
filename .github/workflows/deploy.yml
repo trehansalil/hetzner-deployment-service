@@ -3,10 +3,19 @@
 #   1. A repository_dispatch event from neonatal-care-repo, airline-hr-chatbot or the
 #      pageindex repo (pageindex-mcp / docling-service images) after image push
 #   2. Manual workflow_dispatch for any app
+#   3. A push to main touching pageindex-mcp manifests or the docling node
+#      script: re-applies pageindex-mcp config (no image change), so a merge
+#      alone puts it live
 
 name: Deploy to Hetzner
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - apps/pageindex-mcp/**
+      - cluster/k3s/option-a-docling-node/**
+      - .github/workflows/deploy.yml
   repository_dispatch:
     types:
       - neonatal-care-image-updated
@@ -53,11 +62,30 @@ jobs:
 
       - name: Determine app and image tag
         id: vars
+        # app and image_tag come from the dispatch payload / workflow input:
+        # untrusted. Pass them via env (never interpolate into the script) and
+        # validate before they reach $GITHUB_OUTPUT or any later step.
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          APP_IN: ${{ github.event.client_payload.app || github.event.inputs.app || 'neonatal-care' }}
+          TAG_IN: ${{ github.event.client_payload.image_tag || github.event.inputs.image_tag || 'latest' }}
         run: |
-          APP=${{ github.event.client_payload.app || github.event.inputs.app || 'neonatal-care' }}
-          TAG=${{ github.event.client_payload.image_tag || github.event.inputs.image_tag || 'latest' }}
-          echo "app=$APP" >> $GITHUB_OUTPUT
-          echo "image_tag=$TAG" >> $GITHUB_OUTPUT
+          if [ "$EVENT_NAME" = push ]; then
+            APP=pageindex-mcp
+          else
+            APP="$APP_IN"
+          fi
+          case "$APP" in
+            infra|neonatal-care|airline-hr-chatbot|pageindex-mcp|docling-service) ;;
+            *) echo "::error::unknown app"; exit 1 ;;
+          esac
+          TAG="$TAG_IN"
+          # OCI tag grammar; also rules out newlines and shell metacharacters.
+          if ! [[ "$TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+            echo "::error::invalid image_tag"; exit 1
+          fi
+          echo "app=$APP" >> "$GITHUB_OUTPUT"
+          echo "image_tag=$TAG" >> "$GITHUB_OUTPUT"
 
       # Shared infrastructure — manual deploys only (3rd-party images, no rollout).
       # Secrets are gitignored and must be created out-of-band (make k8s-secrets-infra).
@@ -121,24 +149,46 @@ jobs:
         if: steps.vars.outputs.app == 'pageindex-mcp'
         run: |
           kubectl apply -f apps/pageindex-mcp/namespace.yaml
-          # RFC-050 rollout order: docling-service must be Ready BEFORE the worker
-          # restarts with DOCLING_SERVICE_URL=http://docling-service:8080 (configmap
-          # below) — otherwise in-flight/new jobs hit a missing endpoint. service.yaml
-          # carries both the pageindex-mcp and docling-service Services.
+          # The worker converts via docling-active (docling-active.yaml): the Mac
+          # mini (docling-service-mac.yaml) or the on-demand node docling-1,
+          # switched by `docling-node.sh tick` in docling-node-controller. Both Services must
+          # exist BEFORE the worker restarts with the configmap below.
+          # service.yaml carries the pageindex-mcp and docling-service Services.
           kubectl apply -f apps/pageindex-mcp/service.yaml -n pageindex-mcp
-          kubectl apply -f apps/pageindex-mcp/docling-service-deployment.yaml -n pageindex-mcp
-          kubectl apply -f apps/pageindex-mcp/docling-service-public.yaml -n pageindex-mcp
-          # docling-service is pinned to the on-demand node docling-1; while that
-          # node is down (docling-node.sh down) its pod is Pending by design, so
-          # only wait for the rollout when the node is Ready.
-          if kubectl get nodes -l workload=docling --no-headers 2>/dev/null | grep -qw Ready; then
-            kubectl rollout status deployment/docling-service -n pageindex-mcp --timeout=600s
+          kubectl apply -f apps/pageindex-mcp/docling-service-mac.yaml -n pageindex-mcp
+          kubectl apply -f apps/pageindex-mcp/docling-active.yaml -n pageindex-mcp
+          # While docling-1 exists, docling-node.sh owns the docling-service
+          # Deployment (replicas, image, node-sized resources): re-applying the
+          # at-rest manifest (replicas 0) would kill a conversion mid-failover.
+          if kubectl get nodes -l workload=docling --no-headers 2>/dev/null | grep -q .; then
+            echo "docling node present: leaving the docling-service Deployment to docling-node.sh"
           else
-            echo "docling node down: skipping docling-service rollout wait"
+            kubectl apply -f apps/pageindex-mcp/docling-service-deployment.yaml -n pageindex-mcp
           fi
+          kubectl apply -f apps/pageindex-mcp/docling-service-public.yaml -n pageindex-mcp
+          # The failover/reaper loop: the script as a ConfigMap (picked up on
+          # the next tick) and the controller running it. Needs the one-time
+          # Secret docling-node-hcloud (see docling-node-controller.yaml).
+          kubectl create configmap docling-node-script -n pageindex-mcp \
+            --from-file=cluster/k3s/option-a-docling-node/docling-node.sh \
+            --from-file=cluster/k3s/option-a-docling-node/cloud-init-docling-agent.yaml \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl apply -f apps/pageindex-mcp/docling-node-controller.yaml
+          # Pods read the configmap only at start: on a push (no image
+          # change) restart server + worker when it actually changed.
+          CM_CHANGED=0
+          kubectl diff -f apps/pageindex-mcp/configmap.yaml -n pageindex-mcp >/dev/null || CM_CHANGED=1
           kubectl apply -f apps/pageindex-mcp/configmap.yaml -n pageindex-mcp
           kubectl apply -f apps/pageindex-mcp/deployment.yaml -n pageindex-mcp
           kubectl apply -f apps/pageindex-mcp/worker-deployment.yaml -n pageindex-mcp
+          if [ "$GITHUB_EVENT_NAME" = push ] && [ "$CM_CHANGED" = 1 ]; then
+            kubectl rollout restart deployment/pageindex-mcp deployment/pageindex-mcp-worker -n pageindex-mcp
+          fi
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            kubectl rollout status deployment/pageindex-mcp -n pageindex-mcp --timeout=300s
+            kubectl rollout status deployment/pageindex-mcp-worker -n pageindex-mcp --timeout=300s
+            kubectl rollout status deployment/docling-node-controller -n pageindex-mcp --timeout=180s
+          fi
           kubectl apply -f apps/pageindex-mcp/certificate.yaml -n pageindex-mcp
           kubectl apply -f apps/pageindex-mcp/ingress.yaml -n pageindex-mcp
           kubectl delete ingress pageindex-mcp -n pageindex-mcp --ignore-not-found
@@ -152,14 +202,29 @@ jobs:
         run: |
           kubectl apply -f apps/pageindex-mcp/namespace.yaml
           kubectl apply -f apps/pageindex-mcp/service.yaml -n pageindex-mcp
-          kubectl apply -f apps/pageindex-mcp/docling-service-deployment.yaml -n pageindex-mcp
+          # Same guard as the pageindex-mcp step: never reset a live docling-1.
+          if kubectl get nodes -l workload=docling --no-headers 2>/dev/null | grep -q .; then
+            echo "docling node present: leaving the docling-service Deployment to docling-node.sh"
+          else
+            kubectl apply -f apps/pageindex-mcp/docling-service-deployment.yaml -n pageindex-mcp
+          fi
           kubectl apply -f apps/pageindex-mcp/docling-service-public.yaml -n pageindex-mcp
-          # Both copies (docling-1 node + portfolio local) run the same image.
-          for d in docling-service docling-service-local; do
-            kubectl set image deployment/$d \
-              docling-service=ghcr.io/trehansalil/docling-service:${{ steps.vars.outputs.image_tag }} \
-              -n pageindex-mcp
-          done
+          # Only the portfolio-local copy follows ghcr. The docling-1 copy runs
+          # the image baked into the node snapshot (`docling-node.sh up` pins
+          # it); a ghcr tag there would leave the node in ImagePullBackOff.
+          kubectl set image deployment/docling-service-local \
+            "docling-service=ghcr.io/trehansalil/docling-service:$IMAGE_TAG" \
+            -n pageindex-mcp
+          # Ask docling-node-controller to re-bake the docling-1 snapshot at
+          # this commit (it bakes on its next idle tick; see docling-node.sh
+          # maybe_bake). Only for a full-sha tag, not `latest`.
+          SHA="${IMAGE_TAG#sha-}"
+          if [[ "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            kubectl -n pageindex-mcp create configmap docling-node-state 2>/dev/null || true
+            kubectl -n pageindex-mcp patch configmap docling-node-state --type merge \
+              -p "{\"data\":{\"bake-want\":\"$SHA\"}}"
+            echo "docling-1 snapshot re-bake requested at $SHA"
+          fi
           # Recreate strategy: expect a short conversion outage; worker jobs in
           # flight fail over per the worker's remote-call timeout/retry handling.
           # docling-service is pinned to the on-demand node docling-1; while that
@@ -170,43 +235,51 @@ jobs:
           else
             echo "docling node down: skipping docling-service rollout wait"
           fi
+        env:
+          IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
 
       - name: Update image tag (rolling deploy) — neonatal-care
         if: steps.vars.outputs.app == 'neonatal-care'
         run: |
           kubectl set image deployment/neonatal-care-backend \
-            neonatal-care-backend=ghcr.io/trehansalil/neonatal-care:${{ steps.vars.outputs.image_tag }} \
+            "neonatal-care-backend=ghcr.io/trehansalil/neonatal-care:$IMAGE_TAG" \
             -n neonatal-care
           kubectl set image deployment/neonatal-care-nginx \
-            copy-static=ghcr.io/trehansalil/neonatal-care:${{ steps.vars.outputs.image_tag }} \
+            "copy-static=ghcr.io/trehansalil/neonatal-care:$IMAGE_TAG" \
             -n neonatal-care
           kubectl rollout restart deployment/neonatal-care-nginx -n neonatal-care
           kubectl rollout status deployment/neonatal-care-backend -n neonatal-care --timeout=300s
           kubectl rollout status deployment/neonatal-care-nginx -n neonatal-care --timeout=120s
+        env:
+          IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
 
       - name: Update image tag (rolling deploy) — airline-hr-chatbot
         if: steps.vars.outputs.app == 'airline-hr-chatbot'
         run: |
           kubectl set image deployment/app \
-            app=ghcr.io/trehansalil/airline-hr-chatbot:${{ steps.vars.outputs.image_tag }} \
+            "app=ghcr.io/trehansalil/airline-hr-chatbot:$IMAGE_TAG" \
             -n hr-chatbot
           kubectl set image deployment/oracle \
-            oracle=ghcr.io/trehansalil/airline-hr-chatbot:${{ steps.vars.outputs.image_tag }} \
+            "oracle=ghcr.io/trehansalil/airline-hr-chatbot:$IMAGE_TAG" \
             -n hr-chatbot
           kubectl rollout status deployment/app -n hr-chatbot --timeout=300s
           kubectl rollout status deployment/oracle -n hr-chatbot --timeout=120s
+        env:
+          IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
 
       - name: Update image tag (rolling deploy) — pageindex-mcp
-        if: steps.vars.outputs.app == 'pageindex-mcp'
+        if: steps.vars.outputs.app == 'pageindex-mcp' && github.event_name != 'push'
         run: |
           kubectl set image deployment/pageindex-mcp \
-            pageindex-mcp=ghcr.io/trehansalil/pageindex-mcp:${{ steps.vars.outputs.image_tag }} \
+            "pageindex-mcp=ghcr.io/trehansalil/pageindex-mcp:$IMAGE_TAG" \
             -n pageindex-mcp
           kubectl set image deployment/pageindex-mcp-worker \
-            worker=ghcr.io/trehansalil/pageindex-mcp:${{ steps.vars.outputs.image_tag }} \
+            "worker=ghcr.io/trehansalil/pageindex-mcp:$IMAGE_TAG" \
             -n pageindex-mcp
           kubectl rollout status deployment/pageindex-mcp -n pageindex-mcp --timeout=300s
           kubectl rollout status deployment/pageindex-mcp-worker -n pageindex-mcp --timeout=300s
+        env:
+          IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
 
       - name: Post-deploy pod cleanup — neonatal-care
         if: steps.vars.outputs.app == 'neonatal-care'
@@ -223,8 +296,9 @@ jobs:
           kubectl delete pods -n pageindex-mcp --field-selector=status.phase==Succeeded --ignore-not-found || true
 
       - name: Verify deployment
+        env:
+          APP: ${{ steps.vars.outputs.app }}
         run: |
-          APP="${{ steps.vars.outputs.app }}"
           if [ "$APP" = "airline-hr-chatbot" ]; then
             NS="hr-chatbot"
           elif [ "$APP" = "docling-service" ]; then
