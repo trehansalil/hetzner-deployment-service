@@ -6,6 +6,8 @@
 #   3. A push to main touching pageindex-mcp manifests or the docling node
 #      script: re-applies pageindex-mcp config (no image change), so a merge
 #      alone puts it live
+#   4. A push to main touching apps/infra/**: applies the infra stack exactly
+#      as the manual `app: infra` dispatch does (a push touching both runs both)
 
 name: Deploy to Hetzner
 
@@ -15,6 +17,7 @@ on:
     paths:
       - apps/pageindex-mcp/**
       - cluster/k3s/option-a-docling-node/**
+      - apps/infra/**
       - .github/workflows/deploy.yml
   repository_dispatch:
     types:
@@ -69,11 +72,39 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           APP_IN: ${{ github.event.client_payload.app || github.event.inputs.app || 'neonatal-care' }}
           TAG_IN: ${{ github.event.client_payload.image_tag || github.event.inputs.image_tag || 'latest' }}
+          BEFORE: ${{ github.event.before }}
         run: |
+          INFRA=false
           if [ "$EVENT_NAME" = push ]; then
-            APP=pageindex-mcp
+            # Which trigger paths did this push touch? Fetch only the
+            # pre-push commit (the checkout is shallow) and diff the two trees.
+            # Unknown base (new branch, force-push past a GC'd commit):
+            # apply both stacks rather than silently skip one.
+            if [[ "$BEFORE" =~ ^[0-9a-f]{40}$ ]] && [ "$BEFORE" != 0000000000000000000000000000000000000000 ] \
+               && git fetch --no-tags --depth=1 origin "$BEFORE" \
+               && CHANGED=$(git diff --name-only "$BEFORE" "$GITHUB_SHA"); then
+              printf 'changed:\n%s\n' "$CHANGED"
+            else
+              echo "::warning::push base unknown; applying infra and pageindex-mcp"
+              CHANGED=$'apps/infra/\napps/pageindex-mcp/'
+            fi
+            grep -q '^apps/infra/' <<<"$CHANGED" && INFRA=true
+            # The pre-existing push behaviour: pageindex-mcp re-apply for its
+            # manifests, the docling node script, or this workflow file.
+            if grep -qE '^(apps/pageindex-mcp/|cluster/k3s/option-a-docling-node/|\.github/workflows/deploy\.yml$)' <<<"$CHANGED"; then
+              APP=pageindex-mcp
+            elif [ "$INFRA" = true ]; then
+              APP=infra
+            else
+              APP=pageindex-mcp
+            fi
           else
             APP="$APP_IN"
+            # Manual dispatch only: a repository_dispatch payload never
+            # selects the infra apply (same gate as before).
+            if [ "$APP" = infra ] && [ "$EVENT_NAME" = workflow_dispatch ]; then
+              INFRA=true
+            fi
           fi
           case "$APP" in
             infra|neonatal-care|airline-hr-chatbot|pageindex-mcp|docling-service) ;;
@@ -86,11 +117,14 @@ jobs:
           fi
           echo "app=$APP" >> "$GITHUB_OUTPUT"
           echo "image_tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "infra=$INFRA" >> "$GITHUB_OUTPUT"
 
-      # Shared infrastructure — manual deploys only (3rd-party images, no rollout).
-      # Secrets are gitignored and must be created out-of-band (make k8s-secrets-infra).
+      # Shared infrastructure — manual `app: infra` dispatch, or a push to main
+      # touching apps/infra/** (3rd-party images, no rollout restart).
+      # Secrets are gitignored and must be created out-of-band (make k8s-secrets-infra);
+      # secret.yaml is never applied here.
       - name: Apply k8s manifests — infra
-        if: steps.vars.outputs.app == 'infra' && github.event_name == 'workflow_dispatch'
+        if: steps.vars.outputs.infra == 'true'
         run: |
           kubectl apply -f apps/infra/namespace.yaml
           kubectl apply -f apps/infra/configmap.yaml -n infra
@@ -100,6 +134,9 @@ jobs:
           kubectl apply -f apps/infra/service.yaml -n infra
           kubectl apply -f apps/infra/statefulset.yaml -n infra
           kubectl apply -f apps/infra/deployment.yaml -n infra
+          # Loki push endpoint for the Mac, bound to portfolio's tailscale0 IP
+          # only (RFC-052 D2). No NodePort, no host firewall step.
+          kubectl apply -f apps/infra/loki-tailscale-gateway.yaml -n infra
           kubectl apply -f apps/infra/daemonset.yaml -n infra
           kubectl apply -f apps/infra/certificate.yaml -n infra
           kubectl apply -f apps/infra/ingress.yaml -n infra
@@ -294,6 +331,12 @@ jobs:
           echo "Cleaning up evicted/failed/succeeded pods post-deploy..."
           kubectl delete pods -n pageindex-mcp --field-selector=status.phase==Failed --ignore-not-found || true
           kubectl delete pods -n pageindex-mcp --field-selector=status.phase==Succeeded --ignore-not-found || true
+
+      # After every other step, so a gateway that is still waiting for
+      # tailscale0 never blocks a pageindex-mcp apply in the same push.
+      - name: Wait for loki-tailscale-gateway — infra
+        if: steps.vars.outputs.infra == 'true'
+        run: kubectl rollout status deployment/loki-tailscale-gateway -n infra --timeout=120s
 
       - name: Verify deployment
         env:
