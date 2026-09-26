@@ -129,7 +129,13 @@ for a in "$@"; do
 done
 set -- "${ARGS[@]+"${ARGS[@]}"}"
 
-log() { printf '\033[1m==>\033[0m %s\n' "$*" >&2; }
+# Bold only on a terminal: in the controller pod stderr goes to the container
+# log (and Loki), where escape codes would break the stable "==> " prefix.
+if [ -t 2 ]; then
+  log() { printf '\033[1m==>\033[0m %s\n' "$*" >&2; }
+else
+  log() { printf '==> %s\n' "$*" >&2; }
+fi
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 # Mutating commands go through run(): printed, and skipped under --dry-run.
 run() {
@@ -725,6 +731,11 @@ cmd_tick() {
   fi
   cmd_reap
   [ "$fails" -ne 0 ] || maybe_bake
+  # One line per tick, even when nothing changed: the steady state (Mac up,
+  # no docling-1, no bake) otherwise logs nothing, and a silent controller is
+  # indistinguishable from a dead one in Loki (RFC-052 R1 AC5).
+  if [ "$fails" -eq 0 ]; then log "tick: done (mac up)"
+  else log "tick: done (mac down, $fails consecutive failed probe(s))"; fi
 }
 
 cmd_reaper() {
@@ -806,7 +817,7 @@ case "${1:-}" in
     mkdir -p "$(dirname "$LOCK")"
     exec 9>"$LOCK"
     # Polled, not `flock -w`: the controller image's busybox flock has no -w.
-    if [ "$1" = tick ]; then flock -n 9 || exit 0
+    if [ "$1" = tick ]; then flock -n 9 || { log "tick: lock busy ($LOCK) -- skipping this tick"; exit 0; }
     else
       t=0
       until flock -n 9; do
