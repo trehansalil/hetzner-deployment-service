@@ -1,11 +1,11 @@
-# On-demand docling node (`docling-1`, cx33)
+# On-demand docling node (`docling-1`, cpx62, spot-style)
 
 **Status (2026-09-25):** set up and verified. Snapshot of `docling-service:38835af` baked (auto-sized parallel chunks); `up` → HTTPS health, 401 without token, egress lock → `down` all checked. docling-1 is down (no server billing).
 Chosen over resizing portfolio (cx series out of stock for migration; a resize
 is a power-off). Scheduled cx33↔cx43 resizing is on hold — see
 [Option B rescale](../OPTION-B-RESCALE.md).
 
-`docling-1` is a second Hetzner Cloud server (cx33: 4 vCPU / 8 GB, hel1; `DOCLING_NODE_TYPE` overrides). It
+`docling-1` is a second Hetzner Cloud server (cpx62: 16 shared vCPU / 32 GB, hel1, since 2026-09-26; was cx33; `DOCLING_NODE_TYPE` overrides). It
 joins the portfolio k3s cluster as an agent over a private network, runs only
 docling-service, and exists only while you need it. `docling-node.sh` drives
 everything; every mutating step accepts `--dry-run`.
@@ -25,7 +25,7 @@ everything; every mutating step accepts `--dry-run`.
 
 | Item | When billed | Price |
 |---|---|---|
-| `docling-1` cx33 + primary IPv4 | while the server **exists** (off still bills) | €0.0136 + €0.0008 = **€0.0144/h** |
+| `docling-1` cpx62 + primary IPv4 | every **started** hour while the server exists (off still bills) | €0.2083 + €0.0008 = **€0.2091/h**, max 3 h (€0.63) per `up` under the reaper |
 | docling snapshot | while kept | €0.0143/GB/month (~8–12 GB → ~€0.15/mo) |
 | private network, firewalls, DNS record | — | free |
 
@@ -103,6 +103,26 @@ workflow switches the Deployments to the GHCR tag instead.
 ./docling-node.sh status   # server, node, pods, snapshot size and cost
 ./docling-node.sh down     # drain, delete node + server; billing stops
 ```
+
+### Spot-style reaper (2026-09-26)
+
+The Mac mini (`docling-service-mac`) is the primary converter; `docling-1` is a
+standby you start for a burst of work and that removes itself. Hetzner bills
+every started hour from creation, so the reaper deletes the node just before an
+hour ends:
+
+- `docling-node-reaper.timer` (systemd, on portfolio) runs `docling-node.sh reap` every 2 min.
+- In the last 8 min of each billed hour: `down` if the docling pod is idle; if it
+  is converting (≥500m CPU) keep it for the next hour.
+- After 3 billed hours: `down` even if busy — a conversion in flight fails.
+- Knobs: `DOCLING_REAP_MARGIN_MIN` (8), `DOCLING_BUSY_MCPU` (500), `DOCLING_MAX_HOURS` (3);
+  set them with `systemctl edit docling-node-reaper.service` (`Environment=`).
+- `./docling-node.sh reaper on|off` installs or disables the timer; `journalctl -u docling-node-reaper` shows every decision.
+- The timer runs the script from this checkout: keep a branch that has `reap` checked out here.
+
+`up` sets the Deployment image to the `docling-service:<tag>` in the snapshot's
+description, so a stray ghcr tag (a `docling-service` deploy dispatch) cannot
+leave the pod in ImagePullBackOff.
 
 While up, `https://docling.saliltrehan.com` answers from anywhere with
 `Authorization: Bearer <DOCLING_SERVICE_BEARER_TOKEN from pageindex-mcp-secrets>`.
