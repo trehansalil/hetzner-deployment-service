@@ -56,6 +56,29 @@ data:
       server {
         listen __TS_IP__:3100;
 
+        # Binding to the TS IP restricts the destination address, not the
+        # ingress interface: a pod (10.42.x) or private-net peer (10.x) can
+        # still address a packet to 100.120.146.20 and Linux may deliver it
+        # locally regardless of the arriving interface (weak host model).
+        # With Loki auth disabled that would bypass the Tailscale-only
+        # boundary, so also allow-list by source: only tailnet CGNAT
+        # addresses (100.64.0.0/10) may proceed. Pod IPs (10.42.x) and the
+        # Hetzner private net (10.x) are both outside this range and denied.
+        # The readiness probe's wget runs in the host netns and connects to
+        # $TS_IP; the kernel routes that via the local table (src
+        # 100.120.146.20, the TS IP itself), which is inside 100.64.0.0/10,
+        # so the probe still passes.
+        # Residual: a peer that spoofs a 100.64.0.0/10 source on the private
+        # net. Tailscale's own ts-input iptables chain already guards this
+        # at the host level independent of this allow-list (verified on
+        # portfolio): "-A ts-input -s 100.64.0.0/10 ! -i tailscale0 -j DROP"
+        # drops any 100.64.0.0/10-sourced packet not arriving on tailscale0,
+        # so a spoofed source from cni0/enp7s0 is dropped before nginx ever
+        # sees it. rp_filter (strict mode, sysctl = 2, on all relevant
+        # interfaces here) is not what provides this guarantee.
+        allow 100.64.0.0/10;
+        deny all;
+
         # Alloy push batches (snappy protobuf) stay well under this.
         client_max_body_size 10m;
         client_body_buffer_size 1m;
@@ -127,7 +150,7 @@ spec:
         app: loki-tailscale-gateway
       annotations:
         # Bump when the ConfigMap above changes, so the apply rolls the pod.
-        loki-tailscale-gateway/config-rev: "1"
+        loki-tailscale-gateway/config-rev: "2"
     spec:
       hostNetwork: true
       # Resolve loki.infra.svc.cluster.local through CoreDNS despite hostNetwork.
@@ -149,6 +172,15 @@ spec:
         # The nginx user of nginx-unprivileged.
         runAsUser: 101
         runAsGroup: 101
+        # Explicit hardening, not strictly required: kubelet creates
+        # disk-backed emptyDir directories mode 0777 (verified empirically
+        # on the running pod: `stat -c %a /tmp` -> 777, owned root:root, and
+        # the backing dir under
+        # /var/lib/kubelet/pods/<uid>/volumes/kubernetes.io~empty-dir/tmp on
+        # the host is also drwxrwxrwx), so uid 101 can already write to
+        # /tmp without fsGroup. Setting it anyway means the write access
+        # doesn't rely on that kubelet default.
+        fsGroup: 101
         seccompProfile:
           type: RuntimeDefault
       terminationGracePeriodSeconds: 10
