@@ -160,10 +160,12 @@ kubectl -n pageindex-mcp create secret generic docling-node-bake \
 ```
 
 The controller's image is `alpine/k8s` (kubectl, jq, curl, busybox); hcloud v1.69.0 is
-downloaded and checksum-verified by an initContainer. RBAC: cluster-wide node
-patch/delete, pod eviction and reads for `drain`, metrics for the busy check; namespaced
-patch/scale of Deployments, the `docling-active` EndpointSlice, and ConfigMap
-`docling-node-state` (the daily autostart count, so a pod restart cannot reset the cap).
+downloaded and checksum-verified by an initContainer. RBAC: cluster-wide node reads,
+patch/delete of the Node `docling-1` only (`resourceNames`), pod and workload reads for
+`drain`, metrics for the busy check; namespaced (pageindex-mcp) pod eviction, patch/scale
+of Deployments, the `docling-active` EndpointSlice, and ConfigMap `docling-node-state`
+(the daily autostart count, so a pod restart cannot reset the cap). The ServiceAccount
+does not automount its token; only the controller pod opts in.
 
 Manual commands still work from portfolio or inside the pod
 (`kubectl -n pageindex-mcp exec deploy/docling-node-controller -c tick -- bash /state/docling-node.sh status`);

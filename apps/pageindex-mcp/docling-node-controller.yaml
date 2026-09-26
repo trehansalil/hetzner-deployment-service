@@ -1,6 +1,8 @@
 # docling-node-controller: runs `docling-node.sh tick` every 30 s inside the
 # cluster (Mac/docling-1 failover routing, autostart, spot-style reaper).
-# Replaces the systemd timer on portfolio, so merging to main is all it takes:
+# It owns docling-1 and the docling-active EndpointSlice; the old host timer
+# docling-node-reaper.timer on portfolio is only a fallback that disables
+# itself once this Deployment is Ready. Merging to main is all it takes:
 # deploy.yml publishes the script as ConfigMap docling-node-script and applies
 # this file on every push. The script is copied before each run, so a new
 # version takes effect on the next tick (the ConfigMap volume syncs in ~1 min).
@@ -15,16 +17,23 @@
 # the k3s join token for the build server's user-data, and the SSH key that
 # hands it HF_TOKEN over the private network.
 #
-# RBAC: `down` drains and deletes the docling-1 Node (cluster-wide: nodes,
-# pod listing + eviction, daemonset/replicaset/statefulset lookups for drain,
-# metrics for the busy check, the redis Service in infra). Namespaced:
-# scale/patch docling-service, write the docling-active EndpointSlice and the
-# docling-node-state ConfigMap.
+# RBAC, least privilege. Cluster-wide: read nodes; patch/update/delete ONLY
+# the Node docling-1 (`up` uncordons it, `down` cordons, drains and deletes
+# it); pod listing across namespaces and daemonset/replicaset/statefulset
+# lookups (what `kubectl drain` reads); metrics for the busy check; the
+# redis Service in infra. Namespaced to pageindex-mcp: pods/eviction (drain
+# only ever evicts docling-service: docling-1 is tainted dedicated=docling
+# and nothing outside pageindex-mcp tolerates it except DaemonSets, which
+# drain skips), scale/patch docling-service, write the docling-active
+# EndpointSlice and the docling-node-state ConfigMap.
+# The ServiceAccount does not automount its token; only the controller pod
+# opts in, so another pod naming this SA gets no API credentials.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: docling-node-controller
   namespace: pageindex-mcp
+automountServiceAccountToken: false
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -33,13 +42,15 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: [nodes]
-    verbs: [get, list, watch, patch, update, delete]
+    verbs: [get, list, watch]
+  # resourceNames must match the script's NODE (docling-node.sh).
+  - apiGroups: [""]
+    resources: [nodes]
+    resourceNames: [docling-1]
+    verbs: [patch, update, delete]
   - apiGroups: [""]
     resources: [pods, services]
     verbs: [get, list, watch]
-  - apiGroups: [""]
-    resources: [pods/eviction]
-    verbs: [create]
   - apiGroups: [apps]
     resources: [daemonsets, replicasets, statefulsets]
     verbs: [get, list]
@@ -75,6 +86,9 @@ rules:
   - apiGroups: [""]
     resources: [configmaps]
     verbs: [get, create, patch, update]
+  - apiGroups: [""]
+    resources: [pods/eviction]
+    verbs: [create]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -111,6 +125,8 @@ spec:
         app: docling-node-controller
     spec:
       serviceAccountName: docling-node-controller
+      # The SA does not automount; this pod is the one that needs the token.
+      automountServiceAccountToken: true
       # Never on the node it deletes.
       affinity:
         nodeAffinity:

@@ -104,11 +104,18 @@ NS=pageindex-mcp
 HERE=$(cd "$(dirname "$0")" && pwd)
 K3S_DROPIN=/etc/rancher/k3s/config.yaml.d/20-private-net.yaml
 TMP=$(mktemp -d)
-# A bake that dies after creating its server deletes it: it bills hourly.
+# A bake or up that dies after creating its server deletes it: it bills
+# hourly, and a half-built docling-1 left behind would also stop the next
+# tick's autostart (it sees the server) until the reaper got to it.
 BAKING=0
-trap 'rc=$?; if [ "$rc" != 0 ] && [ "$BAKING" = 1 ]; then
-  BAKING=0; log "bake failed (exit $rc): deleting $NODE"; cmd_down || true; fi
+STARTING=0
+trap 'rc=$?; if [ "$rc" != 0 ] && [ "$BAKING$STARTING" != 00 ]; then
+  what=bake; [ "$STARTING" = 1 ] && what=up
+  BAKING=0; STARTING=0; log "$what failed (exit $rc): deleting $NODE"; cmd_down || true; fi
   rm -rf "$TMP"' EXIT
+# The controller's `timeout` sends TERM. Untrapped, bash still runs the EXIT
+# trap but with $? = 0, so the cleanup above would be skipped.
+trap 'exit 143' TERM
 
 DRY_RUN=0
 YES=0
@@ -397,7 +404,7 @@ predict_pod_size() {  # predict_pod_size TYPE -> "cpu_m mem_mi"
 # ON_SERVER_CREATED (a command name, optional) runs each time `up` actually
 # creates a server -- the moment billing starts -- so `tick` counts autostarts
 # by money spent: a stock miss creates nothing and costs no quota, and an `up`
-# that dies after its create (the reaper later deletes the node) still counts.
+# that dies after its create (the EXIT trap deletes the node) still counts.
 # Here, not after cmd_up returns: its failures exit the script.
 ON_SERVER_CREATED=
 server_created() {
@@ -430,6 +437,7 @@ cmd_up() {
       '{spec: {replicas: 1, template: {spec: {containers: [{name: "docling-service", image: $img,
         resources: {requests: {cpu: $cpu, memory: $mem}, limits: {cpu: $cpu, memory: $mem}}}]}}}}')"
     log "Create $NODE: $type in $loc (EUR $price/h) from snapshot $snap -- billing starts"
+    STARTING=1
     # A type can sell out between the stock check and the create: move on.
     if run hcloud server create --name "$NODE" --type "$type" --image "$snap" \
         --location "$loc" --ssh-key "$SSH_KEY_NAME" --firewall "$FW_NODE" \
@@ -441,6 +449,7 @@ cmd_up() {
     exists_server "$NODE" && { server_created; run hcloud server delete "$NODE"; }
   done <<<"$cands"
   if [ -z "$created" ]; then
+    STARTING=0
     run kubectl -n "$NS" scale deployment/docling-service --replicas=0
     die "every in-stock candidate failed to create"
   fi
@@ -457,6 +466,8 @@ cmd_up() {
     size_pod_to_node
   fi
   run kubectl -n "$NS" rollout status deployment/docling-service --timeout=600s
+  # The pod is serving: from here a failure no longer deletes the node.
+  STARTING=0
   # traefik picks up the new endpoint a few seconds after the rollout: retry
   # the 503 for up to a minute, and warn rather than fail (the node is up).
   # Skipped in the controller: failover routes to the pod IP, not the ingress.
@@ -645,6 +656,9 @@ state_get() {  # state_get KEY -> value or empty
     | jq -r --arg k "$1" '.data[$k] // empty' || true
 }
 state_set() {  # state_set KEY VALUE; drops autostarts-* keys of other days
+  # The patch is a JSON merge patch (--type merge): keys it leaves out are
+  # kept as they are, so bake-want and bake-tries-* survive. It carries only
+  # KEY and a null for each autostarts-* key of another day (null deletes).
   # --dry-run must leave the counters the real tick decides on untouched.
   [ "$DRY_RUN" = 1 ] && { printf '  + state_set %s %s\n' "$1" "$2" >&2; return 0; }
   kubectl -n "$NS" create configmap "$STATE_CM" >/dev/null 2>&1 || true

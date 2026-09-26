@@ -1,8 +1,11 @@
 # What the worker converts through (DOCLING_SERVICE_URL=http://docling-active:8090).
 # Selector-less: its one endpoint is either the Mac mini (docling-service-mac,
 # 100.106.50.6:8090) or the docling-service pod on the on-demand node docling-1
-# (<pod IP>:8080). `docling-node.sh tick` (systemd timer on portfolio, every
-# 30 s) rewrites the EndpointSlice: Mac while it answers /health, docling-1
+# (<pod IP>:8080). The in-cluster Deployment docling-node-controller
+# (docling-node-controller.yaml; `docling-node.sh tick` every 30 s) owns and
+# rewrites the EndpointSlice. The host timer docling-node-reaper.timer on
+# portfolio is only a fallback that disables itself once the controller is
+# Ready. Routing: Mac while it answers /health, docling-1
 # once its pod is Ready and the Mac is not. See
 # cluster/k3s/option-a-docling-node/RUNBOOK.md "Failover".
 #
