@@ -394,6 +394,17 @@ predict_pod_size() {  # predict_pod_size TYPE -> "cpu_m mem_mi"
     | jq -r '"\(.cores * 1000) \((.memory * 1024 * 0.9 - 512) | floor)"'
 }
 
+# ON_SERVER_CREATED (a command name, optional) runs each time `up` actually
+# creates a server -- the moment billing starts -- so `tick` counts autostarts
+# by money spent: a stock miss creates nothing and costs no quota, and an `up`
+# that dies after its create (the reaper later deletes the node) still counts.
+# Here, not after cmd_up returns: its failures exit the script.
+ON_SERVER_CREATED=
+server_created() {
+  [ "$DRY_RUN" = 1 ] || [ -z "$ON_SERVER_CREATED" ] || "$ON_SERVER_CREATED" \
+    || log "WARN: $ON_SERVER_CREATED failed after creating $NODE"
+}
+
 cmd_up() {
   exists_server "$NODE" && { log "$NODE already exists"; cmd_status; return; }
   local snap; snap=$(newest_snapshot)
@@ -423,10 +434,11 @@ cmd_up() {
     if run hcloud server create --name "$NODE" --type "$type" --image "$snap" \
         --location "$loc" --ssh-key "$SSH_KEY_NAME" --firewall "$FW_NODE" \
         --label role=k3s-agent --label workload=docling --start-after-create=false </dev/null; then
-      created=$type; break
+      server_created; created=$type; break
     fi
     log "create of $type in $loc failed; trying the next candidate"
-    exists_server "$NODE" && run hcloud server delete "$NODE"
+    # A half-failed create still left a server behind: its hour is billed.
+    exists_server "$NODE" && { server_created; run hcloud server delete "$NODE"; }
   done <<<"$cands"
   if [ -z "$created" ]; then
     run kubectl -n "$NS" scale deployment/docling-service --replicas=0
@@ -506,11 +518,25 @@ cmd_status() {
   hcloud server describe "$PORTFOLIO" -o json | jq -r '"portfolio: \(.server_type.name) (\(.server_type.memory) GB)"'
 }
 
-# Summed CPU of the docling-service pods in millicores (0 when none or no
-# metrics yet). kubectl top prints "1234m" or whole cores ("2").
+# Summed CPU in millicores of the docling-service pods on docling-1: 0 when
+# none runs there, "unknown" when one does but its CPU cannot be read (API
+# error, metrics-server not scraped it yet). A failed read must not look idle,
+# or the reaper deletes a node mid-conversion. copy=node only: the portfolio
+# copy (copy=local) must not keep docling-1 alive. kubectl top prints "1234m"
+# or whole cores ("2").
 docling_mcpu() {
-  { kubectl top pod -n "$NS" -l app=docling-service --no-headers 2>/dev/null || true; } \
-    | awk '{c=$2; if (c ~ /m$/) {sub(/m$/, "", c)} else {c=c*1000}; s+=c} END {print s+0}'
+  local pods top
+  pods=$(kubectl -n "$NS" get pods -l app=docling-service,copy=node -o json 2>/dev/null \
+    | jq -r --arg n "$NODE" '.items[] | select(.spec.nodeName == $n) | .metadata.name') \
+    || { echo unknown; return; }
+  [ -n "$pods" ] || { echo 0; return; }
+  top=$(kubectl top pod -n "$NS" -l app=docling-service,copy=node --no-headers 2>/dev/null) \
+    || { echo unknown; return; }
+  # Every pod on docling-1 needs a sample; a missing one is not a zero.
+  awk -v want="$(tr '\n' ' ' <<<"$pods")" '
+    BEGIN {n=split(want, w, " "); for (i=1; i<=n; i++) need[w[i]]=1}
+    ($1 in need) {c=$2; if (c ~ /m$/) {sub(/m$/, "", c)} else {c=c*1000}; s+=c; delete need[$1]}
+    END {for (p in need) {print "unknown"; exit} print s+0}' <<<"$top"
 }
 
 cmd_reap() {
@@ -533,6 +559,10 @@ cmd_reap() {
     return 0
   fi
   cpu=$(docling_mcpu)
+  if [ "$cpu" = unknown ]; then
+    log "reap: $NODE CPU unreadable near the end of hour $billed -- keeping it (the $MAX_HOURS h cap still applies)"
+    return 0
+  fi
   if [ "$cpu" -ge "$BUSY_MCPU" ]; then
     log "reap: $NODE busy (${cpu}m CPU) near the end of hour $billed -- keeping it for hour $(( billed + 1 ))"
     return 0
@@ -615,6 +645,8 @@ state_get() {  # state_get KEY -> value or empty
     | jq -r --arg k "$1" '.data[$k] // empty' || true
 }
 state_set() {  # state_set KEY VALUE; drops autostarts-* keys of other days
+  # --dry-run must leave the counters the real tick decides on untouched.
+  [ "$DRY_RUN" = 1 ] && { printf '  + state_set %s %s\n' "$1" "$2" >&2; return 0; }
   kubectl -n "$NS" create configmap "$STATE_CM" >/dev/null 2>&1 || true
   local cur; cur=$(kubectl -n "$NS" get configmap "$STATE_CM" -o json | jq -c '.data // {}')
   kubectl -n "$NS" patch configmap "$STATE_CM" --type merge -p "$(jq -nc \
@@ -623,6 +655,7 @@ state_set() {  # state_set KEY VALUE; drops autostarts-* keys of other days
       | .value = null)) + {($k): $v})}')" >/dev/null
 }
 autostarts_today() { local n; n=$(state_get "autostarts-$(date -u +%F)"); echo "${n:-0}"; }
+record_autostart() { state_set "autostarts-$(date -u +%F)" $(( $(autostarts_today) + 1 )); }
 
 # Re-bake when deploy.yml has recorded a newer docling-service build than the
 # snapshot's. Only while nothing else needs the node: the Mac answers, no
@@ -647,13 +680,14 @@ maybe_bake() {
 }
 
 cmd_tick() {
-  mkdir -p "$STATE_DIR"
+  # --dry-run reads the probe counter to show the decision but never writes
+  # it: the real timer's failover depends on it.
   local fails=0
   if mac_ok; then
-    echo 0 >"$STATE_DIR/mac-fails"
+    [ "$DRY_RUN" = 1 ] || { mkdir -p "$STATE_DIR"; echo 0 >"$STATE_DIR/mac-fails"; }
   else
     fails=$(( $(cat "$STATE_DIR/mac-fails" 2>/dev/null || echo 0) + 1 ))
-    echo "$fails" >"$STATE_DIR/mac-fails"
+    [ "$DRY_RUN" = 1 ] || { mkdir -p "$STATE_DIR"; echo "$fails" >"$STATE_DIR/mac-fails"; }
   fi
 
   if [ "$fails" -eq 0 ]; then
@@ -667,9 +701,10 @@ cmd_tick() {
       if [ "$n" -ge "$AUTOSTART_MAX_PER_DAY" ]; then
         log "tick: Mac down ($fails probes), $d job(s) waiting, but $n autostarts today (max $AUTOSTART_MAX_PER_DAY) -- not starting"
       else
-        state_set "autostarts-$(date -u +%F)" $(( n + 1 ))
-        log "tick: Mac down ($fails probes) and $d job(s) waiting -- starting $NODE (autostart $(( n + 1 ))/$AUTOSTART_MAX_PER_DAY today)"
+        log "tick: Mac down ($fails probes) and $d job(s) waiting -- starting $NODE ($n/$AUTOSTART_MAX_PER_DAY autostarts today; counted when a server is created)"
+        ON_SERVER_CREATED=record_autostart
         cmd_up
+        ON_SERVER_CREATED=
         route_active node
       fi
     fi
@@ -745,7 +780,7 @@ case "${1:-}" in
     if [ "$IN_CLUSTER" = 0 ] && [ "$(kubectl -n "$NS" get deployment "$CONTROLLER" \
          -o jsonpath='{.status.readyReplicas}' 2>/dev/null)" = 1 ]; then
       log "$CONTROLLER runs $1 in the cluster; disabling the host timer $REAPER_UNIT.timer"
-      systemctl disable --now "$REAPER_UNIT.timer" 2>/dev/null || true
+      [ "$DRY_RUN" = 1 ] || systemctl disable --now "$REAPER_UNIT.timer" 2>/dev/null || true
       exit 0
     fi ;;
 esac
