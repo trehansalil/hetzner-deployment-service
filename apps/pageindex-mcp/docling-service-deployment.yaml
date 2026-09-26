@@ -1,0 +1,220 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: docling-service
+  namespace: pageindex-mcp
+spec:
+  # RFC-050: in-cluster Docling conversion service (replaces the Scaleway
+  # function). The worker POSTs a presigned MinIO URL to /convert/pdf and gets
+  # markdown + picture results back, so Docling's ~2Gi RSS lives here instead of
+  # in the worker. Image built from services/docling-service/Dockerfile in the
+  # pageindex repo; models + tessdata are pre-baked (offline at runtime).
+  # Two Deployments share the `app: docling-service` label, so the one
+  # docling-service Service balances over whichever copies are running:
+  #   docling-service        pinned to the on-demand cx33 node `docling-1`
+  #                          (workload=docling). Scaled to 0 while that node
+  #                          is down; docling-node.sh up/down scale it 1/0.
+  #   docling-service-local  on portfolio, replicas 0 unless portfolio has the
+  #                          RAM for it (cx43); `docling-node.sh local on|off`.
+  # The service admits one conversion at a time (DOCLING_MAX_CONCURRENT=1)
+  # and queues the rest, so each pod peaks at one ~2Gi conversion.
+  # 0 at rest: docling-1 is on-demand. `docling-node.sh up` scales to 1
+  # after sizing the pod to the node; `down` scales back to 0.
+  replicas: 0
+  # Recreate, not RollingUpdate: docling-1 cannot hold two Docling pods at
+  # their limit during a rollout.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: docling-service
+      copy: node
+  template:
+    metadata:
+      labels:
+        app: docling-service
+        copy: node
+    spec:
+      nodeSelector:
+        workload: docling
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: docling
+          effect: NoSchedule
+      imagePullSecrets:
+        - name: ghcr-credentials
+      containers:
+        - name: docling-service
+          # Built on the node by `docling-node.sh bake` and imported into its
+          # containerd (no registry pull). After the image is published to
+          # GHCR (master), the deploy workflow `kubectl set image`s this.
+          image: docling-service:38835af
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            # Shared secret with the worker: the worker sends it as a Bearer
+            # token (it reads the same key from pageindex-mcp-secrets). The
+            # service refuses to start without it (it is internet-facing).
+            - name: DOCLING_SERVICE_BEARER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: pageindex-mcp-secrets
+                  key: DOCLING_SERVICE_BEARER_TOKEN
+            # Presigned-URL download timeout (s) inside the service.
+            - name: DOWNLOAD_TIMEOUT_S
+              value: "120"
+            - name: DOCLING_MAX_CONCURRENT
+              value: "1"
+            # Docling threads, parallel chunk processes and chunk size are
+            # NOT set here: the service derives them per request from this
+            # container's cgroup CPU and memory limits
+            # (pageindex_mcp/converters/docling_resources.py). These caps keep
+            # the other native pools from spawning a thread per host vCPU.
+            - name: MKL_NUM_THREADS
+              value: "1"
+            - name: OPENBLAS_NUM_THREADS
+              value: "1"
+            - name: NUMEXPR_NUM_THREADS
+              value: "1"
+          # The FastAPI lifespan warms the Docling converter (model load) before
+          # uvicorn accepts connections, so /health only answers once warm. The
+          # startupProbe allows up to 10s + 30 x 10s = ~5 min for that.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          # Generous: a long conversion can hold the single uvicorn worker's
+          # event loop busy; don't kill a pod mid-conversion over a slow probe.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
+          # Minimal placeholder while docling-1 is down (replicas 0).
+          # `docling-node.sh up` resets requests and limits to the node's
+          # allocatable (minus 256Mi, above the eviction floor) before it
+          # scales to 1, whatever server type it got. The service sizes
+          # itself from these limits.
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "2560Mi"
+            limits:
+              cpu: "2000m"
+              memory: "3584Mi"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: docling-service-local
+  namespace: pageindex-mcp
+spec:
+  # RFC-050: in-cluster Docling conversion service (replaces the Scaleway
+  # function). The worker POSTs a presigned MinIO URL to /convert/pdf and gets
+  # markdown + picture results back, so Docling's ~2Gi RSS lives here instead of
+  # in the worker. Image built from services/docling-service/Dockerfile in the
+  # pageindex repo; models + tessdata are pre-baked (offline at runtime).
+  # Portfolio copy of docling-service (see the docling-service Deployment
+  # above for the two-copy layout). 0 by default: portfolio as cx33 has no
+  # room for it. `docling-node.sh local on` scales it to 1 only when
+  # portfolio has >=16 GB (cx43) and imports the image first.
+  replicas: 0
+  # Recreate, not RollingUpdate: never run two ~2Gi Docling pods at once on
+  # this 7.6Gi single node during a rollout.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: docling-service
+      copy: local
+  template:
+    metadata:
+      labels:
+        app: docling-service
+        copy: local
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: portfolio
+      imagePullSecrets:
+        - name: ghcr-credentials
+      containers:
+        - name: docling-service
+          image: docling-service:38835af
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            # Shared secret with the worker: the worker sends it as a Bearer
+            # token (it reads the same key from pageindex-mcp-secrets). The
+            # service refuses to start without it (it is internet-facing).
+            - name: DOCLING_SERVICE_BEARER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: pageindex-mcp-secrets
+                  key: DOCLING_SERVICE_BEARER_TOKEN
+            # Presigned-URL download timeout (s) inside the service.
+            - name: DOWNLOAD_TIMEOUT_S
+              value: "120"
+            - name: DOCLING_MAX_CONCURRENT
+              value: "1"
+            # Docling threads, parallel chunk processes and chunk size are
+            # NOT set here: the service derives them per request from this
+            # container's cgroup CPU and memory limits
+            # (pageindex_mcp/converters/docling_resources.py). These caps keep
+            # the other native pools from spawning a thread per host vCPU.
+            - name: MKL_NUM_THREADS
+              value: "1"
+            - name: OPENBLAS_NUM_THREADS
+              value: "1"
+            - name: NUMEXPR_NUM_THREADS
+              value: "1"
+          # The FastAPI lifespan warms the Docling converter (model load) before
+          # uvicorn accepts connections, so /health only answers once warm. The
+          # startupProbe allows up to 10s + 30 x 10s = ~5 min for that.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          # Generous: a long conversion can hold the single uvicorn worker's
+          # event loop busy; don't kill a pod mid-conversion over a slow probe.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: "500m"
+              # ~2Gi peak RSS per the service README (RT-DETRv2 + TableFormer).
+              memory: "2560Mi"
+            limits:
+              cpu: "2000m"
+              memory: "3584Mi"

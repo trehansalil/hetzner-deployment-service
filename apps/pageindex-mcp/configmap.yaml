@@ -24,8 +24,11 @@ data:
   # pageindex library and overrides these to "azure/<deployment>" in
   # worker-deployment.yaml — litellm needs the provider prefix to route to Azure.
   PAGEINDEX_MODEL: "gpt-4.1"
-  PAGEINDEX_FILTER_MODEL: "gpt-4.1"
-  PAGEINDEX_SEARCH_MODEL: "gpt-4.1"
+  # Per-stage models, as the engine was tuned: gpt-4.1 builds trees; the
+  # document pre-filter and the per-document tree search are one call each on
+  # the query path, so they run on the small, fast tiers.
+  PAGEINDEX_FILTER_MODEL: "gpt-5.4-mini"
+  PAGEINDEX_SEARCH_MODEL: "gpt-5.4-nano"
   PAGEINDEX_SEARCH_CONCURRENCY: "3"
   # Azure OpenAI routing for litellm (worker side). API version is non-sensitive.
   # NOTE (LLM-01): configure_litellm() derives AZURE_API_BASE from OPENAI_BASE_URL
@@ -47,6 +50,9 @@ data:
   # Node MemAvailable floor (bytes) required before a worker starts a conversion.
   # ~2.2Gi = one ~1.9Gi Docling job + margin on the 7.6Gi node.
   MEM_ADMISSION_FLOOR_BYTES: "2300000000"
+  # RFC-050 D1: floor used instead when DOCLING_SERVICE_URL is set (conversion
+  # runs in docling-service, so the worker needs far less headroom). 800Mi (code default).
+  MEM_ADMISSION_FLOOR_SERVICE_BYTES: "838860800"
   # Hard cap (s) a job waits for headroom before proceeding anyway (fail-open).
   MEM_ADMISSION_MAX_WAIT_S: "120"
   # Re-check cadence (s) while waiting for headroom.
@@ -79,10 +85,20 @@ data:
   FLAT_DOC_ROUTING: "true"
   MAX_DOCLING_PAGES: "150"
   DOCLING_FORCE_FULL_PAGE_OCR: "0"
-  # Remote Docling service (Scaleway). Leave DOCLING_SERVICE_URL empty to
-  # fall back to local conversion. Bearer token lives in the Secret.
-  DOCLING_SERVICE_URL: "https://wisedemo04b4dd27-docling-service.functions.fnc.nl-ams.scw.cloud/"
-  DOCLING_SERVICE_TIMEOUT_S: "1800"
+  # RFC-050: in-cluster Docling service (docling-service-deployment.yaml),
+  # replacing the Scaleway function. Leave DOCLING_SERVICE_URL empty to fall
+  # back to local conversion in the worker (needs the old 2500Mi worker limit).
+  # Bearer token lives in the Secret (DOCLING_SERVICE_BEARER_TOKEN).
+  # NOTE (HR3): with PII_CORPUS=true the boot gate rejects this URL — it is not
+  # on the ZDR allow-list; an in-cluster exemption is needed first.
+  # 2026-09-25: pointed at the Mac mini over Tailscale (docling-service-mac.yaml;
+  # 292-page pocketbook in ~7 min vs 55+ min on docling-1). If the Mac is
+  # off, the converter chain's own fallback applies. Revert to
+  # http://docling-service:8080 (and scale docling-1 up) to switch back.
+  DOCLING_SERVICE_URL: "http://docling-service-mac:8090"
+  # Just under the worker's 3600 s MAX_EFFECTIVE_TIMEOUT cap: a 292-page PDF
+  # must convert and index inside arq's hard 3630 s JOB_TIMEOUT (not env).
+  DOCLING_SERVICE_TIMEOUT_S: "3300"
   # --- Recovery & fallback -----------------------------------------------
   D7_FITZ_FALLBACK_ENABLED: "true"
   D7_GARBLE_RECOVERY_ENABLED: "true"
@@ -93,7 +109,9 @@ data:
   # --- Server / worker limits --------------------------------------------
   LOG_LEVEL: "info"
   MAX_UPLOAD_SIZE_MB: "100"
-  PAGEINDEX_WORKER_MAX_JOBS: "10"
+  # PAGEINDEX_WORKER_MAX_JOBS deliberately unset (RFC-050 D2): with
+  # DOCLING_SERVICE_URL set the worker defaults to 2 concurrent jobs. An
+  # explicit value overrides that (and is clamped to 4) — the old "10" ran 4.
   # --- Registry tuning ----------------------------------------------------
   REGISTRY_DELETE_TIMEOUT_S: "5.0"
   PAGEINDEX_REGISTRY_QUERY_CONCURRENCY: "15"

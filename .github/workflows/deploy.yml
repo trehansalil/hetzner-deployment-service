@@ -1,6 +1,7 @@
 # Deploy workflow — lives in hetzner-deployment-service
 # Triggered by:
-#   1. A repository_dispatch event from neonatal-care-repo or airline-hr-chatbot after image push
+#   1. A repository_dispatch event from neonatal-care-repo, airline-hr-chatbot or the
+#      pageindex repo (pageindex-mcp / docling-service images) after image push
 #   2. Manual workflow_dispatch for any app
 
 name: Deploy to Hetzner
@@ -11,6 +12,9 @@ on:
       - neonatal-care-image-updated
       - airline-hr-chatbot-image-updated
       - pageindex-mcp-image-updated
+      # Sent by pageindex repo .github/workflows/build-push-docling-service.yml
+      # with client_payload {"app": "docling-service", "image_tag": "sha-<sha>"}.
+      - docling-service-image-updated
   workflow_dispatch:
     inputs:
       app:
@@ -23,6 +27,7 @@ on:
           - neonatal-care
           - airline-hr-chatbot
           - pageindex-mcp
+          - docling-service
       image_tag:
         description: 'Image tag (SHA or latest)'
         required: false
@@ -116,14 +121,55 @@ jobs:
         if: steps.vars.outputs.app == 'pageindex-mcp'
         run: |
           kubectl apply -f apps/pageindex-mcp/namespace.yaml
+          # RFC-050 rollout order: docling-service must be Ready BEFORE the worker
+          # restarts with DOCLING_SERVICE_URL=http://docling-service:8080 (configmap
+          # below) — otherwise in-flight/new jobs hit a missing endpoint. service.yaml
+          # carries both the pageindex-mcp and docling-service Services.
+          kubectl apply -f apps/pageindex-mcp/service.yaml -n pageindex-mcp
+          kubectl apply -f apps/pageindex-mcp/docling-service-deployment.yaml -n pageindex-mcp
+          kubectl apply -f apps/pageindex-mcp/docling-service-public.yaml -n pageindex-mcp
+          # docling-service is pinned to the on-demand node docling-1; while that
+          # node is down (docling-node.sh down) its pod is Pending by design, so
+          # only wait for the rollout when the node is Ready.
+          if kubectl get nodes -l workload=docling --no-headers 2>/dev/null | grep -qw Ready; then
+            kubectl rollout status deployment/docling-service -n pageindex-mcp --timeout=600s
+          else
+            echo "docling node down: skipping docling-service rollout wait"
+          fi
           kubectl apply -f apps/pageindex-mcp/configmap.yaml -n pageindex-mcp
           kubectl apply -f apps/pageindex-mcp/deployment.yaml -n pageindex-mcp
           kubectl apply -f apps/pageindex-mcp/worker-deployment.yaml -n pageindex-mcp
-          kubectl apply -f apps/pageindex-mcp/service.yaml -n pageindex-mcp
           kubectl apply -f apps/pageindex-mcp/certificate.yaml -n pageindex-mcp
           kubectl apply -f apps/pageindex-mcp/ingress.yaml -n pageindex-mcp
           kubectl delete ingress pageindex-mcp -n pageindex-mcp --ignore-not-found
           kubectl apply -f apps/pageindex-mcp/cronjob-pod-cleanup.yaml -n pageindex-mcp
+
+      # docling-service image (built by the pageindex repo). Lives in the
+      # pageindex-mcp namespace; touches only the docling-service Deployment +
+      # Service, never the MCP server/worker or the configmap.
+      - name: Apply k8s manifests + image — docling-service
+        if: steps.vars.outputs.app == 'docling-service'
+        run: |
+          kubectl apply -f apps/pageindex-mcp/namespace.yaml
+          kubectl apply -f apps/pageindex-mcp/service.yaml -n pageindex-mcp
+          kubectl apply -f apps/pageindex-mcp/docling-service-deployment.yaml -n pageindex-mcp
+          kubectl apply -f apps/pageindex-mcp/docling-service-public.yaml -n pageindex-mcp
+          # Both copies (docling-1 node + portfolio local) run the same image.
+          for d in docling-service docling-service-local; do
+            kubectl set image deployment/$d \
+              docling-service=ghcr.io/trehansalil/docling-service:${{ steps.vars.outputs.image_tag }} \
+              -n pageindex-mcp
+          done
+          # Recreate strategy: expect a short conversion outage; worker jobs in
+          # flight fail over per the worker's remote-call timeout/retry handling.
+          # docling-service is pinned to the on-demand node docling-1; while that
+          # node is down (docling-node.sh down) its pod is Pending by design, so
+          # only wait for the rollout when the node is Ready.
+          if kubectl get nodes -l workload=docling --no-headers 2>/dev/null | grep -qw Ready; then
+            kubectl rollout status deployment/docling-service -n pageindex-mcp --timeout=600s
+          else
+            echo "docling node down: skipping docling-service rollout wait"
+          fi
 
       - name: Update image tag (rolling deploy) — neonatal-care
         if: steps.vars.outputs.app == 'neonatal-care'
@@ -170,7 +216,7 @@ jobs:
           kubectl delete pods -n neonatal-care --field-selector=status.phase==Succeeded --ignore-not-found || true
 
       - name: Post-deploy pod cleanup — pageindex-mcp
-        if: steps.vars.outputs.app == 'pageindex-mcp'
+        if: steps.vars.outputs.app == 'pageindex-mcp' || steps.vars.outputs.app == 'docling-service'
         run: |
           echo "Cleaning up evicted/failed/succeeded pods post-deploy..."
           kubectl delete pods -n pageindex-mcp --field-selector=status.phase==Failed --ignore-not-found || true
@@ -181,6 +227,8 @@ jobs:
           APP="${{ steps.vars.outputs.app }}"
           if [ "$APP" = "airline-hr-chatbot" ]; then
             NS="hr-chatbot"
+          elif [ "$APP" = "docling-service" ]; then
+            NS="pageindex-mcp"
           else
             NS="$APP"
           fi

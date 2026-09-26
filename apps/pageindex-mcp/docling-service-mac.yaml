@@ -1,0 +1,37 @@
+# docling-service running natively on the Mac mini (M4 Pro), outside the
+# cluster: a launchd agent from services/docling-service/macos/install.sh in
+# the pageindex repo, listening only on the Mac's Tailscale address. The Mac
+# cannot join as a k3s node without a Linux VM that would hide most of its
+# cores, so this selector-less Service + EndpointSlice gives it an in-cluster
+# name (docling-service-mac:8090) and makes it visible in Lens/Freelens.
+# Pods reach 100.64.0.0/10 through the host's tailscale0.
+apiVersion: v1
+kind: Service
+metadata:
+  name: docling-service-mac
+  namespace: pageindex-mcp
+  labels:
+    app: docling-service-mac
+spec:
+  ports:
+    - name: http
+      port: 8090
+      targetPort: 8090
+      protocol: TCP
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: docling-service-mac-1
+  namespace: pageindex-mcp
+  labels:
+    kubernetes.io/service-name: docling-service-mac
+    endpointslice.kubernetes.io/managed-by: pageindex-manual
+addressType: IPv4
+ports:
+  - name: http
+    port: 8090
+    protocol: TCP
+endpoints:
+  - addresses: ["100.106.50.6"]  # salils-mac-mini on the tailnet
+    hostname: salils-mac-mini

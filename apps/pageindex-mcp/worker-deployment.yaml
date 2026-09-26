@@ -39,9 +39,9 @@ spec:
             - name: PAGEINDEX_MODEL
               value: "azure/gpt-4.1"
             - name: PAGEINDEX_FILTER_MODEL
-              value: "azure/gpt-4.1"
+              value: "azure/gpt-5.4-mini"
             - name: PAGEINDEX_SEARCH_MODEL
-              value: "azure/gpt-4.1"
+              value: "azure/gpt-5.4-nano"
           envFrom:
             - configMapRef:
                 name: pageindex-mcp-config
@@ -50,12 +50,13 @@ spec:
           resources:
             requests:
               cpu: "200m"
-              # Request stays low (Burstable QoS) on purpose: the worker bursts to
-              # ~1.9Gi during Docling model-load/inference but idles far below that.
-              # Keeping the request small makes the worker the FIRST pod evicted under
-              # node memory pressure, protecting cotenants (neonatal-care, etcd) on
-              # this shared 7.6Gi single node.
-              memory: "512Mi"
+              # RFC-050: Docling now runs in docling-service, so the worker no
+              # longer bursts to ~1.9Gi. Sized for MAX_JOBS=2 on the service route
+              # (was 512Mi request / 2500Mi limit for local Docling). Still
+              # Burstable QoS. The 1.5Gi limit is an ASSUMPTION (service-path child
+              # peak unmeasured) — if DOCLING_SERVICE_URL is ever emptied (local
+              # Docling fallback) restore the 2500Mi limit or the child OOMs.
+              memory: "1Gi"
             limits:
               cpu: "2000m"
-              memory: "2500Mi"
+              memory: "1536Mi"

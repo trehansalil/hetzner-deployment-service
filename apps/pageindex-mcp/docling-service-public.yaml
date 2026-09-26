@@ -1,0 +1,128 @@
+# Public entry point for docling-service: https://docling.saliltrehan.com
+#
+# Prerequisites (done by cluster/k3s/option-a-docling-node/docling-node.sh setup):
+#   - DNS A record docling.saliltrehan.com -> 89.167.109.165 (portfolio). It
+#     never changes on docling-node up/down: traefik on portfolio routes to
+#     whichever docling-service copy is running, over the private network.
+#   - cert-manager letsencrypt-prod ClusterIssuer (already in the cluster).
+#
+# Auth is the service's own bearer token (DOCLING_SERVICE_BEARER_TOKEN in
+# pageindex-mcp-secrets); the service refuses to start without one. The
+# in-cluster worker keeps using http://docling-service:8080, never this host:
+# PII-bearing documents do not take the public route (HR3).
+
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: docling-service-tls
+  namespace: pageindex-mcp
+spec:
+  secretName: docling-service-tls
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+  dnsNames:
+    - docling.saliltrehan.com
+
+---
+# Per-client-IP request budget. A conversion takes seconds to minutes and the
+# service queues beyond one at a time, so a caller never needs a high rate;
+# this caps how fast a leaked token can be used to queue work.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: docling-ratelimit
+  namespace: pageindex-mcp
+spec:
+  rateLimit:
+    average: 30
+    period: 1m
+    burst: 10
+
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: docling-service
+  namespace: pageindex-mcp
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`docling.saliltrehan.com`)
+      kind: Rule
+      middlewares:
+        - name: docling-ratelimit
+      services:
+        - name: docling-service
+          port: 8080
+  tls:
+    secretName: docling-service-tls
+
+---
+# HTTP -> HTTPS. Reuses the namespace's redirect-https Middleware
+# (apps/pageindex-mcp/ingress.yaml).
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: docling-service-http
+  namespace: pageindex-mcp
+spec:
+  entryPoints:
+    - web
+  routes:
+    - match: Host(`docling.saliltrehan.com`)
+      kind: Rule
+      middlewares:
+        - name: redirect-https
+      services:
+        - name: docling-service
+          port: 8080
+
+---
+# The service downloads whatever presigned_url a caller sends. Now that it is
+# internet-facing, a token holder must not be able to point it at the cluster
+# (MinIO, Redis, Postgres, the API server) or at the Hetzner metadata service,
+# which serves the docling node's user-data including the k3s join token.
+# Allowed: DNS, public addresses, and traefik (a presigned URL on
+# infra.saliltrehan.com from the portfolio copy is DNAT'd to the traefik pod).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: docling-service-egress
+  namespace: pageindex-mcp
+spec:
+  podSelector:
+    matchLabels:
+      app: docling-service
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: traefik
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+              - 100.64.0.0/10

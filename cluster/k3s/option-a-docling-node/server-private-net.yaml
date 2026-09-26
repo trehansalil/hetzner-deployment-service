@@ -1,0 +1,26 @@
+# k3s SERVER drop-in for node `portfolio`.
+# Installed by `docling-node.sh setup` as
+# /etc/rancher/k3s/config.yaml.d/20-private-net.yaml, with __PRIVATE_IFACE__
+# replaced by the NIC that holds 10.0.0.2 after the network attach.
+#
+# Moves the node's InternalIP and flannel VXLAN onto the Hetzner private
+# network so the docling agent joins over 10.0.0.0/16 and pod-to-pod traffic
+# (worker -> docling-service:8080) never crosses the public interface.
+#
+# Requires a `systemctl restart k3s` on portfolio (API outage ~30-90s;
+# containers keep running because the unit uses KillMode=process).
+# The datastore is sqlite/kine (server/db/state.db; db/etcd is empty), so
+# changing node-ip does not hit the embedded-etcd peer-URL problem.
+
+# Private IP assigned by `hcloud server attach-to-network --ip 10.0.0.2`.
+node-ip: "10.0.0.2"
+# Keep the public IP as ExternalIP so ServiceLB (svclb-traefik) keeps
+# publishing 89.167.109.165 as the traefik LoadBalancer ingress address.
+node-external-ip: "89.167.109.165"
+# Private NIC name, detected by `docling-node.sh setup` after the attach.
+flannel-iface: "__PRIVATE_IFACE__"
+# The agent dials the private IP; the GitHub Actions deploy dials the public
+# one (KUBECONFIG_B64), so the serving cert must cover both.
+tls-san+:
+  - "10.0.0.2"
+  - "89.167.109.165"
