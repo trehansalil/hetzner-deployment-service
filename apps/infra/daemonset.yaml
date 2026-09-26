@@ -23,6 +23,13 @@ spec:
         - key: node-role.kubernetes.io/master
           operator: Exists
           effect: NoSchedule
+        # docling-1 (on-demand, cloud-init node-taint dedicated=docling:NoSchedule):
+        # ship docling-service logs from it to loki.infra over the private
+        # network (RFC-052 R1 AC4). Its memory comes out of docling-1's RAM.
+        - key: dedicated
+          operator: Equal
+          value: docling
+          effect: NoSchedule
       containers:
         - name: promtail
           image: grafana/promtail:3.0.0

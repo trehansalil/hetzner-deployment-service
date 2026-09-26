@@ -138,14 +138,16 @@ data:
           - source_labels: [__meta_kubernetes_pod_label_app]
             target_label: service
 
-          - source_labels: [__meta_kubernetes_pod_name]
+          # container = the container name (server / worker / tick / ...),
+          # pod = the pod name. `stream` (stdout|stderr) is set by the cri stage.
+          - source_labels: [__meta_kubernetes_pod_container_name]
             target_label: container
+
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
 
           - source_labels: [__meta_kubernetes_namespace]
             target_label: namespace
-
-          - source_labels: [__meta_kubernetes_pod_container_name]
-            target_label: stream
 
           - source_labels:
               - __meta_kubernetes_pod_uid
@@ -154,17 +156,52 @@ data:
             target_label: __path__
             replacement: /var/log/pods/*$1/*.log
 
+        # RFC-052 R1 AC1-3. Lines are the `obs` JSON envelope v1
+        # (pageindex_mcp/obs/formatter.py; docling-service emits the same):
+        #   {"v":1,"ts":"2026-09-26T11:54:25.967Z","level":"INFO","kind":"log",
+        #    "logger":"...","msg":"...","run_id":..,"job_id":..,"doc_sha8":..,"doc_id":..}
+        # Only level and kind become labels (a handful of values each); the
+        # IDs are unbounded, so they go to structured metadata and are
+        # filtered in LogQL as `{...} | job_id="..."` (Loki 3,
+        # allow_structured_metadata in loki-config).
         pipeline_stages:
           - cri: {}
+          # uvicorn/gunicorn access lines for scrapes and probes:
+          #   10.42.0.36:53074 - "GET /metrics HTTP/1.1" 200
+          - drop:
+              expression: '"(GET|HEAD) /(metrics|health)'
+          # arq's plain-text console handler repeats every arq.worker record
+          # that the JSON root handler already ships:
+          #   11:54:25:   0.51s → cron:reap_stale_jobs()
+          # Scoped to pageindex-mcp so no other app's HH:MM:SS lines are lost.
+          - match:
+              selector: '{namespace="pageindex-mcp"}'
+              stages:
+                - drop:
+                    expression: '^\d{2}:\d{2}:\d{2}: '
           - json:
               expressions:
-                level:     level
-                logger:    name
-                message:   msg
-                timestamp: timestamp
+                level:    level
+                logger:   logger
+                ts:       ts
+                kind:     kind
+                job_id:   job_id
+                doc_id:   doc_id
+                doc_sha8: doc_sha8
+                run_id:   run_id
+          # ts is RFC3339 UTC with milliseconds; non-JSON lines keep the CRI time.
+          - timestamp:
+              source: ts
+              format: RFC3339Nano
+              action_on_failure: skip
           - labels:
               level:
-              logger:
+              kind:
+          - structured_metadata:
+              job_id:
+              doc_id:
+              doc_sha8:
+              run_id:
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -1358,6 +1395,387 @@ data:
       "title": "PageIndex MCP Metrics",
       "uid": "pageindex-mcp-metrics",
       "version": 1
+    }
+  # RFC-052 R1 AC10. Generated; job_id/doc_sha8/run_id are promtail structured
+  # metadata on cluster streams, JSON fields on the Mac's Alloy stream.
+  pageindex_logs.json: |
+    {
+      "title": "PageIndex Logs",
+      "uid": "pageindex-logs",
+      "description": "RFC-052 R1: one job_id across portfolio, docling-1 and the Mac -- full log stream, per-chunk conversion timeline, errors",
+      "editable": true,
+      "graphTooltip": 1,
+      "id": null,
+      "links": [],
+      "tags": [
+        "pageindex",
+        "logs",
+        "rfc-052"
+      ],
+      "time": {
+        "from": "now-6h",
+        "to": "now"
+      },
+      "timezone": "browser",
+      "refresh": "",
+      "schemaVersion": 39,
+      "version": 1,
+      "templating": {
+        "list": [
+          {
+            "type": "textbox",
+            "name": "job_id",
+            "label": "job_id",
+            "description": "arq job_id of the conversion to follow",
+            "query": "",
+            "current": {
+              "selected": false,
+              "text": "",
+              "value": ""
+            },
+            "options": [],
+            "hide": 0
+          }
+        ]
+      },
+      "panels": [
+        {
+          "type": "row",
+          "id": 1,
+          "title": "Job $job_id",
+          "collapsed": false,
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 0
+          },
+          "panels": []
+        },
+        {
+          "type": "logs",
+          "id": 2,
+          "title": "Logs: job $job_id (cluster + Mac)",
+          "description": "Cluster streams filtered on the job_id structured metadata; Mac (Alloy, host=mac) parsed with | json.",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "gridPos": {
+            "h": 14,
+            "w": 24,
+            "x": 0,
+            "y": 1
+          },
+          "options": {
+            "dedupStrategy": "none",
+            "enableLogDetails": true,
+            "prettifyLogMessage": false,
+            "showCommonLabels": false,
+            "showLabels": false,
+            "showTime": true,
+            "sortOrder": "Ascending",
+            "wrapLogMessage": true
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "expr": "{namespace=~\"pageindex-mcp|infra\"} | job_id=\"$job_id\"",
+              "refId": "A",
+              "queryType": "range"
+            },
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "expr": "{host=\"mac\"} | json | job_id=\"$job_id\"",
+              "refId": "B",
+              "queryType": "range"
+            }
+          ]
+        },
+        {
+          "type": "table",
+          "id": 3,
+          "title": "Chunk timeline (docling_chunk)",
+          "description": "One row per converted chunk, from docling-service on docling-1 (promtail) and the Mac (Alloy).",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "gridPos": {
+            "h": 12,
+            "w": 24,
+            "x": 0,
+            "y": 15
+          },
+          "options": {
+            "showHeader": true,
+            "cellHeight": "sm",
+            "footer": {
+              "show": true,
+              "reducer": [
+                "sum"
+              ],
+              "fields": [
+                "duration_s"
+              ],
+              "countRows": false
+            },
+            "sortBy": [
+              {
+                "displayName": "page_start",
+                "desc": false
+              }
+            ]
+          },
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "align": "auto",
+                "cellOptions": {
+                  "type": "auto"
+                },
+                "inspect": false
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "duration_s"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "s"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 1
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "peak_rss_bytes"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "bytes"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "outcome"
+                },
+                "properties": [
+                  {
+                    "id": "custom.cellOptions",
+                    "value": {
+                      "type": "color-text"
+                    }
+                  },
+                  {
+                    "id": "mappings",
+                    "value": [
+                      {
+                        "type": "value",
+                        "options": {
+                          "ok": {
+                            "color": "green",
+                            "index": 0
+                          }
+                        }
+                      },
+                      {
+                        "type": "regex",
+                        "options": {
+                          "pattern": "^(?!ok$).+",
+                          "result": {
+                            "color": "red",
+                            "index": 1
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "expr": "{namespace=\"pageindex-mcp\"} | job_id=\"$job_id\" |= \"docling_chunk\" | json | event=\"docling_chunk\" | label_format shard=\"{{ or .shard .attrs_shard }}\", chunk=\"{{ or .chunk .attrs_chunk }}\", page_start=\"{{ or .page_start .attrs_page_start }}\", page_end=\"{{ or .page_end .attrs_page_end }}\", backend=\"{{ or .backend .attrs_backend }}\", do_table_structure=\"{{ or .do_table_structure .attrs_do_table_structure }}\", do_ocr=\"{{ or .do_ocr .attrs_do_ocr }}\", tableformer_mode=\"{{ or .tableformer_mode .attrs_tableformer_mode }}\", duration_s=\"{{ or .duration_s .attrs_duration_s }}\", peak_rss_bytes=\"{{ or .peak_rss_bytes .attrs_peak_rss_bytes }}\", outcome=\"{{ or .outcome .attrs_outcome }}\"",
+              "refId": "A",
+              "queryType": "range"
+            },
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "expr": "{host=\"mac\"} |= \"docling_chunk\" | json | job_id=\"$job_id\" | event=\"docling_chunk\" | label_format shard=\"{{ or .shard .attrs_shard }}\", chunk=\"{{ or .chunk .attrs_chunk }}\", page_start=\"{{ or .page_start .attrs_page_start }}\", page_end=\"{{ or .page_end .attrs_page_end }}\", backend=\"{{ or .backend .attrs_backend }}\", do_table_structure=\"{{ or .do_table_structure .attrs_do_table_structure }}\", do_ocr=\"{{ or .do_ocr .attrs_do_ocr }}\", tableformer_mode=\"{{ or .tableformer_mode .attrs_tableformer_mode }}\", duration_s=\"{{ or .duration_s .attrs_duration_s }}\", peak_rss_bytes=\"{{ or .peak_rss_bytes .attrs_peak_rss_bytes }}\", outcome=\"{{ or .outcome .attrs_outcome }}\"",
+              "refId": "B",
+              "queryType": "range"
+            }
+          ],
+          "transformations": [
+            {
+              "id": "extractFields",
+              "options": {
+                "source": "labels",
+                "format": "json",
+                "replace": false,
+                "keepTime": true
+              }
+            },
+            {
+              "id": "filterFieldsByName",
+              "options": {
+                "include": {
+                  "names": [
+                    "Time",
+                    "event",
+                    "job_id",
+                    "shard",
+                    "chunk",
+                    "page_start",
+                    "page_end",
+                    "backend",
+                    "do_table_structure",
+                    "do_ocr",
+                    "tableformer_mode",
+                    "duration_s",
+                    "peak_rss_bytes",
+                    "outcome"
+                  ]
+                }
+              }
+            },
+            {
+              "id": "merge",
+              "options": {}
+            },
+            {
+              "id": "convertFieldType",
+              "options": {
+                "fields": {},
+                "conversions": [
+                  {
+                    "targetField": "page_start",
+                    "destinationType": "number"
+                  },
+                  {
+                    "targetField": "page_end",
+                    "destinationType": "number"
+                  },
+                  {
+                    "targetField": "duration_s",
+                    "destinationType": "number"
+                  },
+                  {
+                    "targetField": "peak_rss_bytes",
+                    "destinationType": "number"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "sortBy",
+              "options": {
+                "fields": {},
+                "sort": [
+                  {
+                    "field": "page_start",
+                    "desc": false
+                  }
+                ]
+              }
+            },
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {},
+                "renameByName": {},
+                "indexByName": {
+                  "Time": 0,
+                  "event": 1,
+                  "job_id": 2,
+                  "shard": 3,
+                  "chunk": 4,
+                  "page_start": 5,
+                  "page_end": 6,
+                  "backend": 7,
+                  "do_table_structure": 8,
+                  "do_ocr": 9,
+                  "tableformer_mode": 10,
+                  "duration_s": 11,
+                  "peak_rss_bytes": 12,
+                  "outcome": 13
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "logs",
+          "id": 4,
+          "title": "Errors & warnings: job $job_id",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "gridPos": {
+            "h": 10,
+            "w": 24,
+            "x": 0,
+            "y": 27
+          },
+          "options": {
+            "dedupStrategy": "signature",
+            "enableLogDetails": true,
+            "prettifyLogMessage": false,
+            "showCommonLabels": false,
+            "showLabels": true,
+            "showTime": true,
+            "sortOrder": "Ascending",
+            "wrapLogMessage": true
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "expr": "{namespace=~\"pageindex-mcp|infra\"} | job_id=\"$job_id\" | level=~\"(?i)(error|warn|warning)\"",
+              "refId": "A",
+              "queryType": "range"
+            },
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "expr": "{host=\"mac\"} | json | job_id=\"$job_id\" | level=~\"(?i)(error|warn|warning)\"",
+              "refId": "B",
+              "queryType": "range"
+            }
+          ]
+        }
+      ]
     }
 ---
 apiVersion: v1
