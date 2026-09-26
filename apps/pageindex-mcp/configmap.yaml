@@ -111,6 +111,11 @@ data:
   # --- Auth & compliance -------------------------------------------------
   MCP_ALLOW_UNAUTHENTICATED: "false"
   PII_CORPUS: "false"
+  # HR2 erasure: delete_doc files Loki delete requests for log lines naming
+  # the document (ERASE-01-C5). In-cluster ClusterIP, not the push-only
+  # Tailscale gateway. Unset = step skipped and every erasure reports
+  # partial_purge. Lookback (default 168h) must cover Loki's 72h retention.
+  PAGEINDEX_LOKI_URL: "http://loki.infra.svc.cluster.local:3100"
   # --- Server / worker limits --------------------------------------------
   LOG_LEVEL: "info"
   MAX_UPLOAD_SIZE_MB: "100"
