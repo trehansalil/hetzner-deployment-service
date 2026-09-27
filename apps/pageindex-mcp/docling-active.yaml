@@ -9,9 +9,24 @@
 # once its pod is Ready and the Mac is not. See
 # cluster/k3s/option-a-docling-node/RUNBOOK.md "Failover".
 #
-# The slice below is the at-rest state (the Mac). A deploy re-applies it; if
-# docling-1 was serving at that moment, the next tick (<= 30 s) points it
-# back, and the worker's transient retry covers the gap.
+# The slice below is the at-rest state: EMPTY endpoints, not the Mac (Q5 item
+# 13 / RFC-052 coldstart investigation). deploy.yml re-applies this file on
+# every push (`kubectl apply -f apps/pageindex-mcp/docling-active.yaml`), and
+# for a while that re-apply pinned the slice back to the Mac's address even
+# when the Mac was down -- clobbering the controller's own "route to
+# docling-1 / route to none" decision and blackholing every job behind a dead
+# Mac until the next tick (<= 30 s) noticed and re-routed. Twice in one night.
+# Empty endpoints make a deploy-time clobber fail SAFE: kube-proxy REJECTs
+# (immediate ECONNREFUSED, the worker's retry/backoff sees a clean error)
+# rather than a 130 s SYN blackhole to an address nothing answers on. The next
+# tick (<= 30 s) still re-routes to whichever backend just proved itself
+# healthy (mac_ok, or a Ready docling-1 pod), same as before.
+#
+# This is chosen over "stop applying the slice on deploy" because the Service
+# above still needs applying (its port), and splitting one logical object
+# across two files/commands (apply the Service, never touch the
+# EndpointSlice) is a subtler footgun than the EndpointSlice simply reasserting
+# a safe empty state that the very next tick overwrites in either case.
 apiVersion: v1
 kind: Service
 metadata:
@@ -38,5 +53,4 @@ ports:
   - name: http
     port: 8090
     protocol: TCP
-endpoints:
-  - addresses: ["100.106.50.6"]  # salils-mac-mini on the tailnet
+endpoints: []

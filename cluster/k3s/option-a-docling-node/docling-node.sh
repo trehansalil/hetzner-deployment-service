@@ -550,8 +550,11 @@ wait_for_scheduled() {  # wait_for_scheduled SECONDS
 }
 
 cmd_down() {
-  # Send new conversions back to the Mac before the node goes away.
-  route_active mac
+  # Send new conversions back to the Mac before the node goes away -- but only
+  # if it actually answers. Routing to a Mac that is down (Q5 item 13) would
+  # blackhole every job for up to 130s instead of failing fast; go to "none"
+  # (empty endpoints, immediate ECONNREFUSED) instead.
+  if mac_ok; then route_active mac; else route_active none; fi
   # 0 at rest, so no Pending pod holds the node's full request meanwhile.
   run kubectl -n "$NS" scale deployment/docling-service --replicas=0
   if node_ready || kubectl get node "$NODE" >/dev/null 2>&1; then
@@ -629,6 +632,57 @@ cmd_reap() {
     return 0
   fi
   if [ "$cpu" -ge "$BUSY_MCPU" ]; then
+    # Q5 item 14: CPU alone cannot tell a real conversion from an orphan (the
+    # client disconnected but the docling-service request, and therefore the
+    # CPU, is still running -- see Q3). Cross-check docling-service's own
+    # /health (in_flight/current_job_id, Q5 item 10) against the app's job
+    # status hash: if the service still claims to be working current_job_id
+    # but that job is no longer "processing" in Redis, the work is orphaned
+    # and must not extend a billed hour just because the orphan is busy-CPU.
+    if [ "$ORPHAN_CHECK" = 1 ]; then
+      local h hi hj hs
+      h=$(docling_health)
+      if [ -n "$h" ]; then
+        # Pipe-delimited (see docling_health): a NON-whitespace IFS so an
+        # empty current_job_id field stays empty instead of `read` collapsing
+        # it away and shifting started_at into its place -- tab or space as
+        # IFS both collapse consecutive occurrences (they're "IFS
+        # whitespace"); pipe does not.
+        IFS='|' read -r hi hj hs <<<"$h"
+        if [ "${hi:-0}" -gt 0 ] 2>/dev/null && [ -n "$hj" ]; then
+          # job_status_get distinguishes "Redis positively answered" (rc=0,
+          # prints a status word or "absent") from "could not ask" (rc=1,
+          # nothing printed -- a ClusterIP lookup failure, TCP timeout, or
+          # dropped connection). Only a POSITIVE terminal/absent answer counts
+          # as orphaned; a transport failure, "processing"/"pending", or any
+          # other unrecognized status all fall through to the CPU-busy KEEP
+          # below, same as the /health-unreachable case already does. This is
+          # the fix for the blocker where a Redis blip (empty string, same as
+          # a real nil) could delete docling-1 mid-conversion.
+          local st rc=0
+          st=$(job_status_get "$hj") || rc=$?
+          if [ "$rc" -eq 0 ] && { [ "$st" = done ] || [ "$st" = error ] || [ "$st" = absent ]; }; then
+            log "reap: $NODE reports in_flight=$hi current_job_id=$hj (started $hs) but pageindex:job:$hj status=$st -- orphaned, deleting despite ${cpu}m CPU"
+            cmd_down
+            return
+          elif [ "$rc" -ne 0 ]; then
+            log "reap: $NODE reports in_flight=$hi current_job_id=$hj but pageindex:job:$hj status could not be read (Redis unreachable) -- treating as busy, not orphaned"
+          fi
+          # KNOWN GAP (opposite direction, not fixed here): if arq retries
+          # job_id $hj and it re-enters "processing" before this check runs,
+          # a genuinely stale orphan reads as live and is kept for another
+          # billed hour. That costs money, not correctness -- it never kills
+          # a real conversion, so it is left as a known gap rather than
+          # guessed at with no live-log evidence of it actually happening.
+        fi
+      fi
+      # health unreachable, in_flight=0, or current_job_id genuinely empty
+      # (no X-Job-Id on this conversion, or docling-service hasn't shipped
+      # the field yet): nothing to positively cross-check, so "cannot
+      # determine" -> fall through to the plain CPU-busy KEEP below. Never
+      # treated as orphaned -- only a POSITIVE done/error/absent answer for a
+      # REAL job id does that (see above).
+    fi
     log "reap: $NODE busy (${cpu}m CPU) near the end of hour $billed -- keeping it for hour $(( billed + 1 ))"
     return 0
   fi
@@ -654,22 +708,49 @@ node_pod_ip() {
      | .status.podIP] | first // empty'
 }
 
-# Point docling-active (what the worker calls) at the Mac or docling-1's pod.
-route_active() {  # route_active mac|node
+# Point docling-active (what the worker calls) at the Mac, docling-1's pod, or
+# nowhere. "none" (Q5 item 13) writes an EndpointSlice with endpoints: [], so
+# kube-proxy REJECTs (immediate ECONNREFUSED) instead of a SYN blackhole to a
+# dead Mac. Never falls back to the Mac silently: a caller wanting the Mac
+# route must ask for it explicitly and mac_ok has already been checked by the
+# caller (cmd_down, cmd_tick) -- route_active itself does not gate on mac_ok,
+# so it must never be called with "mac" when the Mac is down.
+route_active() {  # route_active mac|node|none
   local addr port want cur
-  if [ "$1" = node ]; then
-    addr=$(node_pod_ip); port=8080
-    [ -n "$addr" ] || { log "route: no Ready pod on $NODE; leaving routing as is"; return 0; }
-  else
-    read -r addr port <<<"$(mac_endpoint)"
-  fi
+  case "$1" in
+    node)
+      addr=$(node_pod_ip); port=8080
+      [ -n "$addr" ] || { log "route: no Ready pod on $NODE; leaving routing as is"; return 0; }
+      ;;
+    none) addr=""; port=8090 ;;
+    *) read -r addr port <<<"$(mac_endpoint)" ;;
+  esac
   want="$addr:$port"
   cur=$(kubectl -n "$NS" get endpointslice "$ACTIVE_SLICE" -o json 2>/dev/null \
-    | jq -r '"\(.endpoints[0].addresses[0]):\(.ports[0].port)"' || true)
+    | jq -r 'if (.endpoints // []) == [] then "" else "\(.endpoints[0].addresses[0]):\(.ports[0].port)" end' || true)
+  [ -n "$addr" ] || want=""
   [ "$cur" = "$want" ] && return 0
-  log "route: $ACTIVE_SVC -> $1 ($want, was ${cur:-unset})"
+  log "route: $ACTIVE_SVC -> $1 (${want:-empty}, was ${cur:-unset})"
   [ "$DRY_RUN" = 1 ] && return 0
-  kubectl apply -f - >/dev/null <<EOF
+  if [ -z "$addr" ]; then
+    kubectl apply -f - >/dev/null <<EOF
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: $ACTIVE_SLICE
+  namespace: $NS
+  labels:
+    kubernetes.io/service-name: $ACTIVE_SVC
+    endpointslice.kubernetes.io/managed-by: docling-node-tick
+addressType: IPv4
+ports:
+  - name: http
+    port: 8090
+    protocol: TCP
+endpoints: []
+EOF
+  else
+    kubectl apply -f - >/dev/null <<EOF
 apiVersion: discovery.k8s.io/v1
 kind: EndpointSlice
 metadata:
@@ -686,6 +767,7 @@ ports:
 endpoints:
   - addresses: ["$addr"]
 EOF
+  fi
 }
 
 # Conversion demand: queued arq jobs + running ones (arq's own cron excluded).
@@ -731,6 +813,131 @@ demand_parse() {
 }
 
 demand() { demand_fetch | demand_parse; }
+
+# ---- docling:backend (Q5 item 12) + orphan-aware reap (Q5 item 14) --------
+
+BACKEND_KEY=docling:backend
+BACKEND_TTL_S=120
+# docling-service's /health orphan fields (in_flight, current_job_id,
+# started_at -- Q5 item 10) are built concurrently by another workstream; this
+# flag is the kill switch if that contract lands differently than expected.
+# 0 falls back to the plain CPU-only busy check reap always had.
+ORPHAN_CHECK=${DOCLING_ORPHAN_CHECK:-1}
+
+# Raw RESP over /dev/tcp, same channel as demand_fetch/demand(). The RESP
+# bytes are built as a separate variable and handed to the inner bash as a
+# positional arg ($1), never interpolated into the -c string itself, so a
+# value containing '$', quotes or CR/LF cannot break the command text (only
+# $ip/$REDIS_DB, both controller-known, are interpolated into the script).
+# Exit status distinguishes "Redis answered" from "could not ask at all":
+# 0 with the raw RESP bytes on stdout when a reply was actually received
+# (including a real nil reply -- "$-1" is non-empty text); 1 with nothing on
+# stdout when the ClusterIP lookup failed, the TCP connect/timeout failed, or
+# the connection dropped mid-reply. Callers (job_status_get, cmd_reap) MUST
+# treat exit 1 as "unknown", never as a positive nil/absent answer -- a Redis
+# blip must never look identical to "the job really doesn't exist".
+redis_cmd() {  # redis_cmd RESP_BYTES -> raw reply on stdout; see exit-status note above
+  local resp=$1 ip out
+  ip=$(kubectl -n "$REDIS_NS" get svc "$REDIS_SVC" -o jsonpath='{.spec.clusterIP}' 2>/dev/null)
+  [ -n "$ip" ] || return 1
+  out=$(timeout 5 bash -c "exec 3<>/dev/tcp/$ip/6379
+    printf 'SELECT $REDIS_DB\r\n%s' \"\$1\" >&3
+    cat <&3" _ "$resp" 2>/dev/null | tr -d '\r')
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out"
+}
+
+redis_get() {  # redis_get KEY -> value on stdout, or empty (incl. on any error)
+  local key=$1 raw
+  raw=$(redis_cmd "$(printf '*2\r\n$3\r\nGET\r\n$%d\r\n%s\r\n' "${#key}" "$key")") || return 0
+  awk 'NR==2{if ($0=="$-1") exit} NR==3{print; exit}' <<<"$raw"
+}
+
+redis_set_ex() {  # redis_set_ex KEY VALUE TTL_S
+  local key=$1 val=$2 ttl=$3
+  redis_cmd "$(printf '*5\r\n$3\r\nSET\r\n$%d\r\n%s\r\n$%d\r\n%s\r\n$2\r\nEX\r\n$%d\r\n%s\r\n' \
+    "${#key}" "$key" "${#val}" "$val" "${#ttl}" "$ttl")" >/dev/null || return 0
+  # Best-effort, like redis_get: under `set -e` a failed publish would abort
+  # cmd_tick before cmd_reap, silently disabling the MAX_HOURS cap and orphan
+  # cleanup for as long as Redis is down. The key's 120 s TTL lets readers
+  # see the gap as a stale/missing key instead.
+}
+
+# HGET pageindex:job:<id> status -- the app's own job-status hash
+# (job_status.py:_job_key / JobStatus), written by upload_app.py/worker.py.
+# It lives in the SAME Redis DB as arq (configmap.yaml REDIS_URL is
+# redis://.../1, matching this script's REDIS_DB), so no extra SELECT is
+# needed. The X-Job-Id header the worker sends docling-service (client/
+# remote.py _CORRELATION_HEADERS) is this same app-level UUID -- NOT arq's own
+# internal job id used for arq:in-progress:<id> -- so this is the correct key
+# to check for docling-service's current_job_id, not an arq:in-progress scan.
+#
+# Returns 1 (nothing printed) when Redis could NOT be reached at all -- a
+# transport failure, distinct from a real answer. Prints "absent" only for an
+# actual $-1 (nil) reply -- HGET replies nil the same way whether the hash key
+# is entirely missing or just has no `status` field, and either case means
+# "nothing to call processing" -- or the status string when HGET found one.
+# Collapsing "couldn't ask" and "hash absent" into the same empty
+# string was the reap-orphan bug this function fixes: a Redis blip must fall
+# through to the existing CPU-busy KEEP, not read as "not processing" and
+# delete a node mid-conversion.
+job_status_get() {  # job_status_get JOB_ID -> status string, "absent", or (rc=1) unknown
+  local id=$1 key raw
+  [ -n "$id" ] || return 1
+  key="pageindex:job:$id"
+  raw=$(redis_cmd "$(printf '*3\r\n$4\r\nHGET\r\n$%d\r\n%s\r\n$6\r\nstatus\r\n' "${#key}" "$key")") || return 1
+  awk 'NR==2{if ($0=="$-1"){print "absent"; exit}} NR==3{print; exit}' <<<"$raw"
+}
+
+# in_flight/current_job_id/started_at from docling-1's own pod directly (not
+# through docling-active, which may be routed at the Mac): Q5 item 10, built
+# concurrently. Fields are read with `// empty`/`// 0` so a docling-service
+# that has not shipped them yet degrades safely (docling_health prints
+# "0||", ORPHAN_CHECK below then finds current_job_id empty and no-ops).
+#
+# Pipe-separated, NOT space- or tab-separated: a conversion with no X-Job-Id
+# (current_job_id null) produces an EMPTY middle field. Space-joined that
+# collapsed under `read`'s IFS word-splitting -- "1  1790000000.5" (in_flight
+# 1, empty job id, a started_at timestamp) would `read -r hi hj hs` as
+# hi=1 hj=1790000000.5 hs="", silently shifting the timestamp into the job-id
+# slot instead of leaving it empty. job_status_get then looked up
+# "pageindex:job:1790000000.5", found nothing, answered "absent", and the
+# reap orphan check deleted a genuinely busy node. Switching to `@tsv` alone
+# does NOT fix this: bash's `read` treats space, tab AND newline as "IFS
+# whitespace" and collapses RUNS of any of them regardless of which one(s)
+# IFS is set to, so two consecutive tabs collapse exactly like two
+# consecutive spaces do (verified: `IFS=$'\t' read -r a b c <<<$'1\t\t2'`
+# still yields b empty and c holding nothing / a wrong shift, not b=""
+# c="2"). A PIPE is not IFS whitespace, so `IFS='|' read` does not collapse
+# repeats and reliably preserves empty fields positionally. None of these
+# values (a bare int, a uuid, an ISO/epoch timestamp) can contain a literal
+# "|", so there is nothing for the join to need to escape.
+docling_health() {  # docling_health -> "in_flight|current_job_id|started_at", or empty
+  local ip; ip=$(node_pod_ip)
+  [ -n "$ip" ] || return 0
+  curl -fsS -m 5 "http://$ip:8080/health" 2>/dev/null \
+    | jq -r '[(.in_flight // 0), (.current_job_id // ""), (.started_at // "")] | join("|")' 2>/dev/null || true
+}
+
+# Publish controller state for the worker's readiness gate (Q5 item 2/12).
+# `since` is held stable while `phase` is unchanged, so the worker can measure
+# an autostart's age even across ticks that just re-publish the same phase.
+publish_backend() {  # publish_backend TARGET PHASE REASON [ETA_S]
+  local target=$1 phase=$2 reason=$3 eta=${4:-0} since prev prev_phase prev_since
+  since=$(date -u +%s)
+  prev=$(redis_get "$BACKEND_KEY")
+  if [ -n "$prev" ]; then
+    prev_phase=$(jq -r '.phase // empty' <<<"$prev" 2>/dev/null || true)
+    prev_since=$(jq -r '.since // empty' <<<"$prev" 2>/dev/null || true)
+    [ "$prev_phase" = "$phase" ] && [ -n "$prev_since" ] && since=$prev_since
+  fi
+  local json
+  json=$(jq -nc --arg t "$target" --arg p "$phase" --arg r "$reason" \
+    --argjson since "$since" --argjson eta "$eta" --argjson n "$(autostarts_today)" \
+    '{target:$t, phase:$p, reason:$r, since:$since, eta_s:$eta, autostarts_today:$n}')
+  [ "$DRY_RUN" = 1 ] && { printf '  + publish_backend %s\n' "$json" >&2; return 0; }
+  redis_set_ex "$BACKEND_KEY" "$json" "$BACKEND_TTL_S"
+}
 
 # Controller state that must survive a pod restart, in ConfigMap
 # docling-node-state: autostarts-<date> (the daily cap), bake-want (the
@@ -788,10 +995,17 @@ cmd_tick() {
     [ "$DRY_RUN" = 1 ] || { mkdir -p "$STATE_DIR"; echo "$fails" >"$STATE_DIR/mac-fails"; }
   fi
 
+  # Q5 item 13: no blackhole routing. Every branch below either routes to a
+  # backend that just proved itself (mac_ok this tick, or a Ready node pod) or
+  # routes to "none" (empty endpoints -> immediate ECONNREFUSED). Previously
+  # the no-pod/no-autostart branches left routing untouched, which could keep
+  # pointing at a Mac that had already failed MAC_FAILS probes.
   if [ "$fails" -eq 0 ]; then
     route_active mac
+    publish_backend mac ready ""
   elif [ -n "$(node_pod_ip)" ]; then
     route_active node
+    publish_backend node ready ""
   elif [ "$fails" -ge "$MAC_FAILS" ] && [ "$AUTOSTART" = 1 ] && ! exists_server "$NODE"; then
     local d q r c f
     read -r d q r c f <<<"$(demand)"
@@ -802,16 +1016,50 @@ cmd_tick() {
       local n; n=$(autostarts_today)
       if [ "$n" -ge "$AUTOSTART_MAX_PER_DAY" ]; then
         log "tick: Mac down ($fails probes), $d job(s) waiting ($why), but $n autostarts today (max $AUTOSTART_MAX_PER_DAY) -- not starting"
+        route_active none
+        publish_backend none down "autostart cap ${n}/${AUTOSTART_MAX_PER_DAY} reached"
       else
         log "tick: Mac down ($fails probes) and $d job(s) waiting ($why) -- starting $NODE ($n/$AUTOSTART_MAX_PER_DAY autostarts today; counted when a server is created)"
+        # Published BEFORE cmd_up, which blocks ~100s: this is the only
+        # chance for the worker's readiness gate to see "starting" while the
+        # lock held by this tick keeps every other tick from running.
+        publish_backend node starting "" 150
         ON_SERVER_CREATED=record_autostart
         cmd_up
         ON_SERVER_CREATED=
         route_active node
+        publish_backend node ready ""
       fi
-    elif [ $(( c + f )) -gt 0 ]; then
-      log "tick: Mac down ($fails probes), no demand ($why) -- not starting"
+    else
+      [ $(( c + f )) -gt 0 ] && log "tick: Mac down ($fails probes), no demand ($why) -- not starting"
+      route_active none
+      publish_backend none down "mac down, no demand"
     fi
+  elif exists_server "$NODE"; then
+    # docling-1 exists (an earlier tick's autostart still booting, or a manual
+    # `up`) but has no Ready pod yet. Route away from the dead Mac rather than
+    # leaving the previous route in place.
+    route_active none
+    publish_backend node starting "" 150
+  elif [ "$fails" -lt "$MAC_FAILS" ]; then
+    # Mac down but short of MAC_FAILS (the Q4 "may be asleep" short-wait
+    # window): no node, nothing proven yet. Reported as target=mac/phase=down
+    # so the worker's short DOCLING_MAC_WAIT_S policy applies instead of
+    # failing fast as target=none would. This window applies REGARDLESS of
+    # AUTOSTART: a disabled autostart still gets to ride out a probe blip
+    # before the worker gives up -- only once MAC_FAILS is actually reached
+    # does "autostart disabled" mean the Mac is not coming back via this path.
+    route_active none
+    publish_backend mac down "mac probe failed ($fails/$MAC_FAILS)"
+  elif [ "$AUTOSTART" != 1 ]; then
+    route_active none
+    publish_backend none down "autostart disabled"
+  else
+    # fails >= MAC_FAILS, AUTOSTART=1, no node -- demand-gated branches above
+    # already handle every real case (start it, cap hit, or no demand); this
+    # is unreachable but kept as a safe fallback rather than an assert.
+    route_active none
+    publish_backend none down "no backend available"
   fi
   cmd_reap
   [ "$fails" -ne 0 ] || maybe_bake
@@ -882,6 +1130,12 @@ cmd_local() {
   esac
 }
 
+# Everything below this point is runtime dispatch (locking, mutation) and only
+# runs when this file is EXECUTED, not when it is `source`d -- tests source it
+# to reach the functions above with PATH-shimmed kubectl/hcloud/redis, without
+# tripping the lock, the host-timer handoff, or a real subcommand dispatch.
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+
 # A host timer from before the in-cluster controller retires itself once the
 # controller is running, so exactly one tick loop drives docling-1.
 case "${1:-}" in
@@ -923,3 +1177,5 @@ case "${1:-}" in
   reaper) shift; cmd_reaper "$@" ;;
   *) sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac
+
+fi # BASH_SOURCE guard
