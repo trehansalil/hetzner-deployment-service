@@ -9,7 +9,6 @@
 #   up               create docling-1 from the newest snapshot and join it
 #   down             drain and delete docling-1 (billing stops; snapshot kept)
 #   status           what exists right now and what it costs
-#   local on|off     the portfolio copy of docling-service (needs cx43 RAM)
 #   tick             run every 30 s by the in-cluster controller
 #                    (apps/pageindex-mcp/docling-node-controller.yaml, deployed
 #                    on every push to main): route docling-active to the Mac or
@@ -22,6 +21,11 @@
 #                    billed hours, `down` even if busy
 #   reaper on|off    host fallback: the same tick from a systemd timer on
 #                    portfolio (retires itself once the controller runs)
+#
+# NG7 / RFC-052 D10: no Docling conversion ever runs on portfolio (4 cores,
+# ~2 GB free). The `local on|off` subcommand and the docling-service-local
+# Deployment it scaled were removed 2026-09-27; the only backends are the
+# Mac and docling-1.
 #
 # Flags: --dry-run prints every mutating command instead of running it.
 #        --yes answers the confirmation prompts (non-interactive runs).
@@ -352,8 +356,7 @@ cmd_bake() {
   wait_for 300 "$NODE Ready" node_ready
 
   local tag="docling-service:${sha:0:7}"
-  # docling-service-local follows the GHCR tag (deploy.yml); only the
-  # docling-1 copy runs the baked image, and `up` re-pins it from the snapshot.
+  # docling-1 runs the baked image; `up` re-pins it from the snapshot.
   log "Point the docling-service Deployment at $tag"
   run kubectl -n "$NS" set image deployment/docling-service "docling-service=$tag"
 
@@ -589,9 +592,9 @@ cmd_status() {
 # Summed CPU in millicores of the docling-service pods on docling-1: 0 when
 # none runs there, "unknown" when one does but its CPU cannot be read (API
 # error, metrics-server not scraped it yet). A failed read must not look idle,
-# or the reaper deletes a node mid-conversion. copy=node only: the portfolio
-# copy (copy=local) must not keep docling-1 alive. kubectl top prints "1234m"
-# or whole cores ("2").
+# or the reaper deletes a node mid-conversion. copy=node only: no other copy
+# exists (NG7 -- there is no portfolio copy to keep docling-1 alive
+# spuriously). kubectl top prints "1234m" or whole cores ("2").
 docling_mcpu() {
   local pods top
   pods=$(kubectl -n "$NS" get pods -l app=docling-service,copy=node -o json 2>/dev/null \
@@ -1115,29 +1118,6 @@ EOF
   esac
 }
 
-cmd_local() {
-  case "${1:-}" in
-    off) run kubectl -n "$NS" scale deployment/docling-service-local --replicas=0 ;;
-    on)
-      local mem; mem=$(hcloud server describe "$PORTFOLIO" -o json | jq -r '.server_type.memory')
-      awk -v m="$mem" 'BEGIN{exit !(m >= 16)}' \
-        || die "portfolio has ${mem} GB; the local copy needs >=16 GB (cx43). Not scaling."
-      local img; img=$(kubectl -n "$NS" get deployment/docling-service-local \
-        -o jsonpath='{.spec.template.spec.containers[0].image}')
-      # A registry ref (ghcr.io/...) is pulled by the kubelet; only a bare
-      # locally built tag has to be copied from the node's containerd.
-      if [[ "$img" != */* ]] && ! k3s ctr -n k8s.io images ls -q | grep -qx "docker.io/library/$img"; then
-        node_ready || die "image $img is not on portfolio; run '$0 up' so it can be copied from $NODE"
-        log "Copy $img from $NODE to portfolio over the private network"
-        [ "$DRY_RUN" = 1 ] || ssh_node "k3s ctr -n k8s.io images export - docker.io/library/$img" \
-          | k3s ctr -n k8s.io images import -
-      fi
-      run kubectl -n "$NS" scale deployment/docling-service-local --replicas=1
-      ;;
-    *) die "usage: $0 local on|off" ;;
-  esac
-}
-
 # Everything below this point is runtime dispatch (locking, mutation) and only
 # runs when this file is EXECUTED, not when it is `source`d -- tests source it
 # to reach the functions above with PATH-shimmed kubectl/hcloud/redis, without
@@ -1179,11 +1159,10 @@ case "${1:-}" in
   up) cmd_up ;;
   down) cmd_down ;;
   status) cmd_status ;;
-  local) shift; cmd_local "$@" ;;
   reap) cmd_reap ;;
   tick) cmd_tick ;;
   reaper) shift; cmd_reaper "$@" ;;
-  *) sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+  *) sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac
 
 fi # BASH_SOURCE guard

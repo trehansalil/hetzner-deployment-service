@@ -16,9 +16,8 @@ everything; every mutating step accepts `--dry-run`.
         ┌───────────▼────────────┐   k3s-net 10.0.0.0/16   ┌──────────────────┐
         │ portfolio (cx33)       │◄───────────────────────►│ docling-1 (cx33) │
         │ traefik, worker, infra │  flannel VXLAN, kubelet │ docling-service  │
-        │ docling-service-local  │                         │ (on demand)      │
-        │ (replicas 0 unless cx43)                         └──────────────────┘
-        └────────────────────────┘
+        │ (no Docling -- NG7)    │                         │ (on demand)      │
+        └────────────────────────┘                         └──────────────────┘
 ```
 
 ## Costs (hel1, 2026-09-25)
@@ -33,11 +32,11 @@ everything; every mutating step accepts `--dry-run`.
 
 | File | Purpose |
 |---|---|
-| `docling-node.sh` | `setup`, `bake`, `up`, `down`, `status`, `local on\|off`, `tick`, `reap` |
+| `docling-node.sh` | `setup`, `bake`, `up`, `down`, `status`, `tick`, `reap` |
 | `apps/pageindex-mcp/docling-node-controller.yaml` | in-cluster loop running `tick` every 30 s, with its RBAC |
 | `server-private-net.yaml` | k3s drop-in for portfolio: node-ip/flannel on the private NIC, public IP kept as ExternalIP and cert SAN |
 | `cloud-init-docling-agent.yaml` | first-boot user-data for `bake`: joins as agent, builds the image from the public repo, imports it into containerd, removes docker |
-| `apps/pageindex-mcp/docling-service-deployment.yaml` | two Deployments behind one Service: `docling-service` (pinned to docling-1) and `docling-service-local` (portfolio, replicas 0) |
+| `apps/pageindex-mcp/docling-service-deployment.yaml` | `docling-service` Deployment, pinned to docling-1 (no portfolio copy -- NG7) |
 | `apps/pageindex-mcp/docling-service-public.yaml` | Certificate, IngressRoute + rate limit, egress NetworkPolicy |
 
 ## 1. One-time setup (run on portfolio as root)
@@ -83,8 +82,7 @@ with nothing run by hand:
 
 1. `build-push-docling-service.yml` (pageindex) runs the quality gates, pushes the
    GHCR image and dispatches `docling-service-image-updated` with `sha-<sha>`.
-2. `deploy.yml` moves `docling-service-local` to that GHCR tag and records the sha
-   as `bake-want` in ConfigMap `docling-node-state`.
+2. `deploy.yml` records the sha as `bake-want` in ConfigMap `docling-node-state`.
 3. On its next tick with the Mac healthy and no docling-1, `docling-node-controller`
    sees the newest snapshot's `pageindex-sha` label differs and runs `bake <sha>`.
    At most `DOCLING_BAKE_MAX_ATTEMPTS` (2) tries per sha (`bake-tries-<sha7>`).
@@ -115,7 +113,7 @@ secret, so it is not in user-data, the image layers or the snapshot. The control
 SSH key and the k3s join token come from the one-time Secret `docling-node-bake`
 (see `docling-node-controller.yaml`). The running service never needs HF_TOKEN
 (models are baked in, runtime is offline). docling-1 always runs the image baked
-into its snapshot (`up` pins it); only `docling-service-local` follows GHCR.
+into its snapshot (`up` pins it).
 
 ## 3. Day to day
 
@@ -220,17 +218,12 @@ While up, `https://docling.saliltrehan.com` answers from anywhere with
 `Authorization: Bearer <DOCLING_SERVICE_BEARER_TOKEN from pageindex-mcp-secrets>`.
 The service refuses to start without that token.
 
-## 4. The portfolio copy
-
-```bash
-./docling-node.sh local on    # refuses unless portfolio has >=16 GB (cx43)
-./docling-node.sh local off
-```
-
-`on` copies the image from docling-1 over the private net if portfolio lacks
-it, so run it while docling-1 is up (or once the GHCR image exists).
-
 ## Things to know
+
+- **No Docling on portfolio (NG7 / RFC-052 D10).** Portfolio has 4 cores and
+  about 2 GB free memory, left entirely to the cluster; the `docling-node.sh
+  local on|off` path and the `docling-service-local` Deployment it scaled
+  were removed 2026-09-27. The only backends are the Mac and docling-1.
 
 - **Sizing is automatic.** `up` gives the docling pod the node's allocatable
   CPU and memory (minus 256Mi), whatever server type it got. The service then

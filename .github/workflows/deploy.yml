@@ -212,6 +212,8 @@ jobs:
             kubectl apply -f apps/pageindex-mcp/docling-service-deployment.yaml -n pageindex-mcp
           fi
           kubectl apply -f apps/pageindex-mcp/docling-service-public.yaml -n pageindex-mcp
+          # RFC-052 NG7: the portfolio copy is gone; apply does not prune it.
+          kubectl -n pageindex-mcp delete deployment docling-service-local --ignore-not-found
           # The failover/reaper loop: the script as a ConfigMap (picked up on
           # the next tick) and the controller running it. Needs the one-time
           # Secret docling-node-hcloud (see docling-node-controller.yaml).
@@ -255,12 +257,11 @@ jobs:
             kubectl apply -f apps/pageindex-mcp/docling-service-deployment.yaml -n pageindex-mcp
           fi
           kubectl apply -f apps/pageindex-mcp/docling-service-public.yaml -n pageindex-mcp
-          # Only the portfolio-local copy follows ghcr. The docling-1 copy runs
-          # the image baked into the node snapshot (`docling-node.sh up` pins
-          # it); a ghcr tag there would leave the node in ImagePullBackOff.
-          kubectl set image deployment/docling-service-local \
-            "docling-service=ghcr.io/trehansalil/docling-service:$IMAGE_TAG" \
-            -n pageindex-mcp
+          # RFC-052 NG7: the portfolio copy is gone; apply does not prune it.
+          kubectl -n pageindex-mcp delete deployment docling-service-local --ignore-not-found
+          # NG7: no portfolio-local copy to point at ghcr. The docling-1 copy
+          # runs the image baked into the node snapshot (`docling-node.sh up`
+          # pins it); a ghcr tag there would leave the node in ImagePullBackOff.
           # Ask docling-node-controller to re-bake the docling-1 snapshot at
           # this commit (it bakes on its next idle tick; see docling-node.sh
           # maybe_bake). Only for a full-sha tag, not `latest`.
