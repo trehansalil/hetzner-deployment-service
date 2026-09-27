@@ -246,6 +246,59 @@ PUB_LOG="$WORK/publish_outage.log"
 ) >/dev/null 2>&1
 assert_contains "publish_backend with Redis down -> tick continues" "$PUB_LOG" "after publish"
 
+echo "== raw Redis reads end: QUIT closes the reply, timeout reaches cat =="
+# 2026-09-27: redis_cmd sent no QUIT, so Redis kept the socket open, and the
+# controller's busybox `timeout 5` killed only the inner bash, never the cat
+# it had forked. The tick hung for an hour and no demand check ran. A fake
+# Redis on 127.0.0.2:6379 answers only once it sees QUIT (a real Redis
+# answers at once but still holds the socket open until QUIT), and busybox
+# timeout stands in for the alpine image's.
+if command -v python3 >/dev/null && command -v busybox >/dev/null; then
+  mkdir -p "$WORK/bb"
+  ln -sf "$(command -v busybox)" "$WORK/bb/timeout"
+  fake_redis() {  # fake_redis MODE -> starts it; MODE quit|silent
+    python3 - "$1" <<'PY' &
+import socket, sys
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.2", 6379)); s.listen(1); s.settimeout(20)
+c, _ = s.accept(); buf = b""
+while sys.argv[1] == "quit" and b"QUIT" not in buf:
+    d = c.recv(4096)
+    if not d: break
+    buf += d
+if sys.argv[1] == "quit":
+    c.sendall(b"+OK\r\n$3\r\nfoo\r\n+OK\r\n"); c.close()
+else:
+    c.recv(4096); __import__("time").sleep(20)
+PY
+    FAKE_PID=$!
+    for _ in $(seq 50); do ss -ltn 2>/dev/null | grep -q '127.0.0.2:6379 ' && break; sleep 0.1; done
+  }
+  REDIS_OUT="$WORK/redis_get.out"
+  fake_redis quit
+  (
+    source "$SCRIPT"; PATH="$WORK/bb:$PATH"
+    kubectl() { echo 127.0.0.2; }
+    start=$SECONDS; v=$(redis_get pageindex:probe)
+    echo "value=$v secs=$((SECONDS - start))"
+  ) >"$REDIS_OUT" 2>/dev/null
+  wait "$FAKE_PID" 2>/dev/null
+  assert_contains "redis_get sends QUIT and reads the reply" "$REDIS_OUT" "value=foo secs=0"
+
+  fake_redis silent
+  (
+    source "$SCRIPT"; PATH="$WORK/bb:$PATH"
+    kubectl() { echo 127.0.0.2; }
+    start=$SECONDS; rc=0; redis_cmd "$(printf '*1\r\n$4\r\nPING\r\n')" || rc=$?
+    echo "rc=$rc bounded=$(( SECONDS - start <= 7 ))"
+  ) >"$REDIS_OUT" 2>/dev/null
+  kill "$FAKE_PID" 2>/dev/null; wait "$FAKE_PID" 2>/dev/null
+  assert_contains "redis_cmd on a Redis that never answers -> unknown within the timeout" \
+    "$REDIS_OUT" "rc=1 bounded=1"
+else
+  echo "  skip - python3 or busybox missing"
+fi
+
 if [ "$FAIL" -eq 0 ]; then
   echo "ALL PASS"
   exit 0

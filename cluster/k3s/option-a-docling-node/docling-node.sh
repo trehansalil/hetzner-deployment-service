@@ -784,9 +784,12 @@ EOF
 demand_fetch() {
   local ip
   ip=$(kubectl -n "$REDIS_NS" get svc "$REDIS_SVC" -o jsonpath='{.spec.clusterIP}')
+  # `exec cat`: cat must BE the process timeout signals. A cat forked by the
+  # inner bash outlives it (busybox timeout kills only its own pid), keeps the
+  # pipe to tr open, and hangs the whole tick -- see redis_cmd.
   timeout 5 bash -c "exec 3<>/dev/tcp/$ip/6379
     printf 'SELECT $REDIS_DB\r\nTIME\r\nZRANGE arq:queue 0 -1 WITHSCORES\r\nKEYS arq:in-progress:*\r\nQUIT\r\n' >&3
-    cat <&3" 2>/dev/null | tr -d '\r' || true
+    exec cat <&3" 2>/dev/null | tr -d '\r' || true
 }
 
 # RESP replies on stdin, in pipeline order: 1 SELECT, 2 TIME, 3 ZRANGE, 4 KEYS.
@@ -840,9 +843,14 @@ redis_cmd() {  # redis_cmd RESP_BYTES -> raw reply on stdout; see exit-status no
   local resp=$1 ip out
   ip=$(kubectl -n "$REDIS_NS" get svc "$REDIS_SVC" -o jsonpath='{.spec.clusterIP}' 2>/dev/null)
   [ -n "$ip" ] || return 1
+  # QUIT makes Redis close the socket, so cat sees EOF as soon as the reply
+  # is in; `exec cat` makes cat the process timeout kills if it never is.
+  # Without both, the 2026-09-27 tick hung for an hour on a cat that the
+  # 5 s timeout never reached (it killed only the inner bash), and no demand
+  # check ran, so a queued job waited for a docling-1 that never started.
   out=$(timeout 5 bash -c "exec 3<>/dev/tcp/$ip/6379
-    printf 'SELECT $REDIS_DB\r\n%s' \"\$1\" >&3
-    cat <&3" _ "$resp" 2>/dev/null | tr -d '\r')
+    printf 'SELECT $REDIS_DB\r\n%sQUIT\r\n' \"\$1\" >&3
+    exec cat <&3" _ "$resp" 2>/dev/null | tr -d '\r')
   [ -n "$out" ] || return 1
   printf '%s\n' "$out"
 }
