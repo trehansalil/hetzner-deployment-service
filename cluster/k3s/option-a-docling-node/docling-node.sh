@@ -59,6 +59,23 @@ NODE_TYPES=${DOCLING_NODE_TYPES:-cpx62 ccx33 cpx52 ccx43 cpx42 cx43}
 [ -z "${DOCLING_NODE_TYPE:-}" ] || NODE_TYPES=$DOCLING_NODE_TYPE
 NODE_LOCATIONS=${DOCLING_NODE_LOCATIONS:-hel1 fsn1 nbg1}
 MAX_EUR_H=${DOCLING_MAX_EUR_H:-0.50}
+# Headroom held back from docling-service's CPU/memory *requests* (see
+# predict_pod_size/size_pod_to_node) so node-wide DaemonSets can still
+# schedule once docling-service claims the rest of the node -- otherwise
+# a request equal to full allocatable leaves them Pending with
+# "Insufficient cpu"/"Insufficient memory" (seen live 2026-09-26: promtail
+# never got a slot on docling-1, so its logs never reached Loki). Cluster
+# DaemonSets today (`kubectl get ds -A`): promtail (infra), requests
+# 50m/128Mi, limits 200m/256Mi, tolerates the docling taint; and
+# svclb-traefik-<id> (kube-system), no requests/limits set and no
+# toleration for `dedicated=docling:NoSchedule`, so it never lands on this
+# node. k3s's own node agent and flannel are not pods (no DaemonSet, no
+# request) -- they come out of the node's system-reserved share, which is
+# already excluded from `allocatable`. 250m/384Mi leaves ~5x promtail's
+# CPU request and ~3x its memory request as margin for future DaemonSets
+# (e.g. node-exporter) without meaningfully starving docling-service.
+DAEMONSET_RESERVE_CPU_M=${DOCLING_DAEMONSET_RESERVE_CPU_M:-250}
+DAEMONSET_RESERVE_MEM_MI=${DOCLING_DAEMONSET_RESERVE_MEM_MI:-384}
 # Failover (`tick`): the worker converts via docling-active:8090, a
 # selector-less Service whose EndpointSlice `tick` points at the Mac while it
 # answers, else at docling-1's pod. With AUTOSTART, a Mac that fails
@@ -359,11 +376,14 @@ cmd_bake() {
 
 # Give the docling pod the whole node, whatever type `up` got: the service
 # derives its threads, parallel chunk processes and chunk size from its own
-# cgroup limits, so these limits are the only sizing input. Only the eviction
-# margin is held back, so a runaway conversion is OOM-killed in its cgroup
-# before the kubelet evicts the pod for node memory pressure.
+# cgroup limits, so the CPU limit is left at the full node and is the only
+# sizing input. Requests (both cpu and memory) and the memory limit hold
+# back DAEMONSET_RESERVE_CPU_M/_MEM_MI on top of the eviction margin, so a
+# runaway conversion is still OOM-killed in its cgroup before the kubelet
+# evicts the pod for node memory pressure, and node-wide DaemonSets can
+# still schedule.
 size_pod_to_node() {
-  local cpu mem cpu_m mem_mi
+  local cpu mem cpu_m mem_mi cpu_req_m
   cpu=$(kubectl get node "$NODE" -o jsonpath='{.status.allocatable.cpu}')
   mem=$(kubectl get node "$NODE" -o jsonpath='{.status.allocatable.memory}')
   case "$cpu" in *m) cpu_m=${cpu%m} ;; *) cpu_m=$((cpu * 1000)) ;; esac
@@ -373,10 +393,25 @@ size_pod_to_node() {
     *Gi) mem_mi=$((${mem%Gi} * 1024)) ;;
     *) mem_mi=$((mem / 1048576)) ;;
   esac
-  mem_mi=$((mem_mi - 256))
-  log "Size docling-service to $NODE: cpu ${cpu_m}m, memory ${mem_mi}Mi (allocatable $cpu / $mem)"
+  # Hold back DAEMONSET_RESERVE_MEM_MI (was a flat 256Mi) so a runaway
+  # conversion is still OOM-killed inside its own cgroup short of node
+  # memory pressure, and so node-wide DaemonSets (promtail; see
+  # DAEMONSET_RESERVE_CPU_M/_MEM_MI above) fit once docling-service claims
+  # the rest of the node. Applied to both request and limit: unlike CPU,
+  # a memory pod that exceeds its limit is OOM-killed rather than
+  # throttled, so letting the limit run up to the full node would risk the
+  # kernel killing a DaemonSet pod instead of docling-service's own cgroup.
+  mem_mi=$((mem_mi - DAEMONSET_RESERVE_MEM_MI))
+  # The CPU *request* holds back DAEMONSET_RESERVE_CPU_M for the same
+  # reason; the CPU *limit* stays at the full node so docling-service can
+  # still burst there. CPU is throttled, not OOM-killed, past its limit,
+  # and the service derives its thread/process/chunk-size sizing from the
+  # cgroup CPU limit (see comment above), so reducing the limit would
+  # silently cut parallelism.
+  cpu_req_m=$((cpu_m - DAEMONSET_RESERVE_CPU_M))
+  log "Size docling-service to $NODE: requests cpu ${cpu_req_m}m mem ${mem_mi}Mi, limits cpu ${cpu_m}m mem ${mem_mi}Mi (allocatable $cpu / $mem)"
   run kubectl -n "$NS" set resources deployment/docling-service -c docling-service \
-    --requests="cpu=${cpu_m}m,memory=${mem_mi}Mi" --limits="cpu=${cpu_m}m,memory=${mem_mi}Mi"
+    --requests="cpu=${cpu_req_m}m,memory=${mem_mi}Mi" --limits="cpu=${cpu_m}m,memory=${mem_mi}Mi"
 }
 
 # "type location eur_per_h" lines, best first: in stock right now, x86, disk
@@ -402,9 +437,19 @@ node_candidates() {  # node_candidates SNAPSHOT_DISK_GB
 # be created before the node exists and schedule the moment it joins.
 # Allocatable measured 2026-09-26: cpx62 (32 GB) -> 30619Mi, cx33 (8 GB) ->
 # ~7014Mi; 90% of RAM less 512Mi stays under both. All cores are allocatable.
-predict_pod_size() {  # predict_pod_size TYPE -> "cpu_m mem_mi"
+# The request (both cpu and memory) holds back DAEMONSET_RESERVE_CPU_M /
+# DAEMONSET_RESERVE_MEM_MI so node-wide DaemonSets can still schedule once
+# docling-service claims the rest of the node -- this is the sizing that
+# produced the live requests=limits=full-node patch that starved promtail
+# (cpx62: requests.cpu 16000m, requests.memory 28979Mi, 2026-09-26). The
+# limit is left at the full predicted size: docling-service derives its
+# thread/process/chunk sizing from its cgroup limits, not its requests, so
+# only the request needs the reserve to fix the DaemonSet scheduling gap.
+predict_pod_size() {  # predict_pod_size TYPE -> "req_cpu_m req_mem_mi lim_cpu_m lim_mem_mi"
   hcloud server-type describe "$1" -o json \
-    | jq -r '"\(.cores * 1000) \((.memory * 1024 * 0.9 - 512) | floor)"'
+    | jq -r --argjson rc "$DAEMONSET_RESERVE_CPU_M" --argjson rm "$DAEMONSET_RESERVE_MEM_MI" '
+      (.cores * 1000) as $cpu | ((.memory * 1024 * 0.9 - 512) | floor) as $mem
+      | "\($cpu - $rc) \($mem - $rm) \($cpu) \($mem)"'
 }
 
 # ON_SERVER_CREATED (a command name, optional) runs each time `up` actually
@@ -437,11 +482,14 @@ cmd_up() {
   while read -r type loc price; do
     # Create the pod first (Pending until the node joins), sized for this
     # type, so it schedules the moment the node is Ready.
-    local size cpu_m mem_mi; size=$(predict_pod_size "$type"); read -r cpu_m mem_mi <<<"$size"
+    local size req_cpu_m req_mem_mi lim_cpu_m lim_mem_mi
+    size=$(predict_pod_size "$type"); read -r req_cpu_m req_mem_mi lim_cpu_m lim_mem_mi <<<"$size"
     run kubectl -n "$NS" patch deployment/docling-service --type=strategic </dev/null -p "$(jq -nc \
-      --arg img "$img" --arg cpu "${cpu_m}m" --arg mem "${mem_mi}Mi" \
+      --arg img "$img" --arg req_cpu "${req_cpu_m}m" --arg req_mem "${req_mem_mi}Mi" \
+      --arg lim_cpu "${lim_cpu_m}m" --arg lim_mem "${lim_mem_mi}Mi" \
       '{spec: {replicas: 1, template: {spec: {containers: [{name: "docling-service", image: $img,
-        resources: {requests: {cpu: $cpu, memory: $mem}, limits: {cpu: $cpu, memory: $mem}}}]}}}}')"
+        resources: {requests: {cpu: $req_cpu, memory: $req_mem},
+                    limits: {cpu: $lim_cpu, memory: $lim_mem}}}]}}}}')"
     log "Create $NODE: $type in $loc (EUR $price/h) from snapshot $snap -- billing starts"
     STARTING=1
     # A type can sell out between the stock check and the create: move on.
