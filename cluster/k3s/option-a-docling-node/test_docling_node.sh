@@ -299,6 +299,26 @@ else
   echo "  skip - python3 or busybox missing"
 fi
 
+echo "== 'local' is no longer a valid subcommand (RFC-052 R5 AC5 / NG7) =="
+# docling-service-local and `docling-node.sh local on|off` were removed
+# 2026-09-27: no Docling conversion may ever run on portfolio. Exercise this
+# as a real (unsourced) invocation -- the dispatch case that used to route
+# `local` to cmd_local lives in the runtime-dispatch tail, which is guarded
+# off under `source` (see the file header), so it cannot be reached from the
+# sourced functions above.
+LOCAL_OUT="$WORK/local_invalid.out"
+LOCAL_RC=0
+( PATH="$BINSTUB:$PATH"; bash "$SCRIPT" local on ) >"$LOCAL_OUT" 2>&1 || LOCAL_RC=$?
+if [ "$LOCAL_RC" -ne 0 ]; then pass "docling-node.sh local on -> non-zero exit"
+else fail "docling-node.sh local on -> non-zero exit" "got exit 0 (output: $(cat "$LOCAL_OUT"))"; fi
+assert_not_contains "docling-node.sh local on -> no cmd_local usage text" \
+  "$LOCAL_OUT" "usage: $SCRIPT local"
+# The banner printed for any invalid subcommand documents the NG7 removal by
+# name (see the file header) -- that is expected, so check for the one thing
+# that would mean `local` was still wired up: an actual kubectl scale call.
+assert_not_contains "docling-node.sh local on -> never scales any docling-service Deployment" \
+  "$LOCAL_OUT" "scale deployment/docling-service"
+
 if [ "$FAIL" -eq 0 ]; then
   echo "ALL PASS"
   exit 0
