@@ -690,17 +690,47 @@ EOF
 
 # Conversion demand: queued arq jobs + running ones (arq's own cron excluded).
 # Raw RESP over /dev/tcp: no redis-cli on the host.
-demand() {
-  local ip out
+# Real ingest work waiting in arq (Redis DB $REDIS_DB). Prints one line,
+#   "<total> <queued> <running> <cron> <deferred>"
+# where only total (= queued + running) is demand. arq cron jobs are excluded
+# on both sides: the worker enqueues each one into arq:queue ~1 s before it
+# fires (id "cron:<name>:<ms>", e.g. cron:reap_stale_jobs every minute), so a
+# raw ZCARD that lands in that window reads 1 and autostarted docling-1 for
+# nothing (5x on 2026-09-26, every decision within 0.4 s of :00). Queue
+# entries scored in the future (deferred; arq scores are ms epochs) are not
+# demand yet either; "now" comes from Redis TIME, not this pod's clock.
+demand_fetch() {
+  local ip
   ip=$(kubectl -n "$REDIS_NS" get svc "$REDIS_SVC" -o jsonpath='{.spec.clusterIP}')
-  out=$(timeout 5 bash -c "exec 3<>/dev/tcp/$ip/6379
-    printf 'SELECT $REDIS_DB\r\nZCARD arq:queue\r\nKEYS arq:in-progress:*\r\nQUIT\r\n' >&3
-    cat <&3" 2>/dev/null | tr -d '\r') || true
-  local queued running
-  queued=$(awk '/^:/ {sub(/^:/, ""); print; exit}' <<<"$out")
-  running=$(grep '^arq:in-progress:' <<<"$out" | grep -vc ':cron:' || true)
-  echo $(( ${queued:-0} + ${running:-0} ))
+  timeout 5 bash -c "exec 3<>/dev/tcp/$ip/6379
+    printf 'SELECT $REDIS_DB\r\nTIME\r\nZRANGE arq:queue 0 -1 WITHSCORES\r\nKEYS arq:in-progress:*\r\nQUIT\r\n' >&3
+    cat <&3" 2>/dev/null | tr -d '\r' || true
 }
+
+# RESP replies on stdin, in pipeline order: 1 SELECT, 2 TIME, 3 ZRANGE, 4 KEYS.
+# POSIX awk only (the controller image is alpine/busybox). Unreachable Redis
+# yields empty input and therefore "0 0 0 0 0" -- no demand, as before.
+demand_parse() {
+  awk '
+    need { v[r, ++n[r]] = $0; need = 0; left--; next }
+    left > 0 && /^\$/ { if ($0 == "$-1") left--; else need = 1; next }
+    { r++; left = 0; if ($0 ~ /^\*/) left = substr($0, 2) + 0 }
+    END {
+      now = v[2, 1] * 1000 + int(v[2, 2] / 1000)
+      for (i = 1; i <= n[3]; i += 2) {
+        if (index(v[3, i], "cron:") == 1) cron++
+        else if (now > 0 && v[3, i + 1] + 0 > now) deferred++
+        else queued++
+      }
+      for (i = 1; i <= n[4]; i++) {
+        if (index(v[4, i], "arq:in-progress:cron:") == 1) cron++
+        else running++
+      }
+      printf "%d %d %d %d %d\n", queued + running, queued, running, cron, deferred
+    }'
+}
+
+demand() { demand_fetch | demand_parse; }
 
 # Controller state that must survive a pod restart, in ConfigMap
 # docling-node-state: autostarts-<date> (the daily cap), bake-want (the
@@ -763,18 +793,24 @@ cmd_tick() {
   elif [ -n "$(node_pod_ip)" ]; then
     route_active node
   elif [ "$fails" -ge "$MAC_FAILS" ] && [ "$AUTOSTART" = 1 ] && ! exists_server "$NODE"; then
-    local d; d=$(demand)
+    local d q r c f
+    read -r d q r c f <<<"$(demand)"
+    # Breakdown on every Mac-down tick so a start (or a cron-only non-start)
+    # is explainable from Loki alone.
+    local why="queued $q, running $r; ignored $c cron, $f deferred"
     if [ "$d" -gt 0 ]; then
       local n; n=$(autostarts_today)
       if [ "$n" -ge "$AUTOSTART_MAX_PER_DAY" ]; then
-        log "tick: Mac down ($fails probes), $d job(s) waiting, but $n autostarts today (max $AUTOSTART_MAX_PER_DAY) -- not starting"
+        log "tick: Mac down ($fails probes), $d job(s) waiting ($why), but $n autostarts today (max $AUTOSTART_MAX_PER_DAY) -- not starting"
       else
-        log "tick: Mac down ($fails probes) and $d job(s) waiting -- starting $NODE ($n/$AUTOSTART_MAX_PER_DAY autostarts today; counted when a server is created)"
+        log "tick: Mac down ($fails probes) and $d job(s) waiting ($why) -- starting $NODE ($n/$AUTOSTART_MAX_PER_DAY autostarts today; counted when a server is created)"
         ON_SERVER_CREATED=record_autostart
         cmd_up
         ON_SERVER_CREATED=
         route_active node
       fi
+    elif [ $(( c + f )) -gt 0 ]; then
+      log "tick: Mac down ($fails probes), no demand ($why) -- not starting"
     fi
   fi
   cmd_reap
