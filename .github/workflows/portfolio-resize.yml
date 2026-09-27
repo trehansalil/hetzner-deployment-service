@@ -1,0 +1,52 @@
+# Resize the portfolio server (the k3s host) to cx43 once Hetzner has capacity
+# in hel1. The resize powers the whole cluster off for a few minutes, so it
+# runs from a GitHub runner and waits behind the `portfolio-resize` environment
+# (required reviewer): a probe that finds capacity sends an approval request.
+#
+# The workflow-level concurrency group holds later probes while a resize is
+# waiting for approval, so there is only ever one request pending. Once the
+# server is cx43 every run is a no-op; disable the workflow then.
+
+name: Portfolio resize to cx43
+
+on:
+  schedule:
+    - cron: "13,43 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: portfolio-resize
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  SERVER_ID: "121945806"
+  TARGET_TYPE: cx43
+  LOCATION: hel1
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      ready: ${{ steps.probe.outputs.ready }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: probe
+        env:
+          HCLOUD_TOKEN: ${{ secrets.HCLOUD_TOKEN }}
+        run: bash .github/scripts/portfolio-resize.sh probe
+
+  resize:
+    needs: probe
+    if: needs.probe.outputs.ready == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: portfolio-resize
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          HCLOUD_TOKEN: ${{ secrets.HCLOUD_TOKEN }}
+        run: bash .github/scripts/portfolio-resize.sh resize
