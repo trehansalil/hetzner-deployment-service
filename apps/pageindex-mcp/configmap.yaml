@@ -85,6 +85,13 @@ data:
   FLAT_DOC_ROUTING: "true"
   MAX_DOCLING_PAGES: "150"
   DOCLING_FORCE_FULL_PAGE_OCR: "0"
+  # RFC-052 P4 table capture: off until the 9.1 live run shows median wall
+  # time within 1.05x and worker memory.peak within the 1536Mi limit.
+  # TABLES_DESC_ENABLED gates the filter-model table descriptions. With
+  # capture off no tables.json is written, so TABLES_IN_SEARCH (default on)
+  # leaves search unchanged.
+  TABLES_CAPTURE: "0"
+  TABLES_DESC_ENABLED: "0"
   # RFC-050: in-cluster Docling service (docling-service-deployment.yaml),
   # replacing the Scaleway function. Leave DOCLING_SERVICE_URL empty to fall
   # back to local conversion in the worker (needs the old 2500Mi worker limit).
