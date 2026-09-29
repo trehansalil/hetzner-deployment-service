@@ -319,6 +319,61 @@ assert_not_contains "docling-node.sh local on -> no cmd_local usage text" \
 assert_not_contains "docling-node.sh local on -> never scales any docling-service Deployment" \
   "$LOCAL_OUT" "scale deployment/docling-service"
 
+echo "== bake: refresh from the snapshot by default, --full from stock ubuntu =="
+# 2026-09-29: a bake from stock ubuntu died on a get.k3s.io outage. A refresh
+# boots the newest snapshot (k3s already installed) and pulls the GHCR image.
+BAKE_SHA=abcdef1234567890abcdef1234567890abcdef12
+bake_dry() {  # bake_dry OUT ARGS... -> the dry-run's printed commands
+  local out=$1; shift
+  (
+    source "$SCRIPT"; set +e +u +o pipefail
+    DRY_RUN=1; export DOCLING_K3S_TOKEN=tok
+    exists_server() { return 1; }; exists_network() { return 0; }
+    newest_snapshot() { echo 4242; }
+    hcloud() { echo '[]'; }; kubectl() { :; }; cmd_down() { :; }
+    cmd_bake "$@"
+  ) >"$out" 2>&1
+}
+BAKE_OUT="$WORK/bake_refresh.out"
+bake_dry "$BAKE_OUT" "$BAKE_SHA"
+assert_contains "bake -> boots the newest snapshot" "$BAKE_OUT" "--image 4242"
+assert_contains "bake -> pulls the GHCR image" "$BAKE_OUT" \
+  "pull 'ghcr.io/trehansalil/docling-service:sha-$BAKE_SHA'"
+assert_contains "bake -> tags it as the name the Deployment uses" "$BAKE_OUT" \
+  "tag --force 'ghcr.io/trehansalil/docling-service:sha-$BAKE_SHA' 'docker.io/library/docling-service:abcdef1'"
+assert_not_contains "bake -> no user-data (no k3s install, no build)" "$BAKE_OUT" "--user-data-from-file"
+assert_contains "bake -> pins the Deployment" "$BAKE_OUT" "docling-service=docling-service:abcdef1"
+assert_contains "bake -> snapshot labelled with the sha" "$BAKE_OUT" "pageindex-sha=abcdef1"
+BAKE_OUT="$WORK/bake_full.out"
+bake_dry "$BAKE_OUT" --full "$BAKE_SHA"
+assert_contains "bake --full -> stock ubuntu" "$BAKE_OUT" "--image ubuntu-24.04"
+assert_contains "bake --full -> cloud-init user-data" "$BAKE_OUT" "--user-data-from-file"
+assert_not_contains "bake --full -> no GHCR pull" "$BAKE_OUT" "images pull"
+
+echo "== maybe_bake: heartbeat keeps docling:backend fresh during a bake =="
+HB_LOG="$WORK/heartbeat.log"
+: > "$HB_LOG"
+(
+  source "$SCRIPT"; set +e +u +o pipefail
+  BAKE_HEARTBEAT_S=0.1
+  state_get() { [ "$1" = bake-want ] && echo "$BAKE_SHA" || echo 0; }
+  state_set() { :; }
+  hcloud() { echo '[]'; }; exists_server() { return 1; }; mac_ok() { return 0; }
+  route_active() { echo "route_active $*" >> "$HB_LOG"; }
+  publish_backend() { echo "publish_backend $*" >> "$HB_LOG"; }
+  cmd_bake() { sleep 0.6; }  # stands in for the long, lock-holding bake
+  maybe_bake
+  wc -l < "$HB_LOG" > "$WORK/hb_n1"
+  sleep 0.4
+  wc -l < "$HB_LOG" > "$WORK/hb_n2"
+) >/dev/null 2>&1
+assert_contains "heartbeat -> publishes the Mac as ready during the bake" "$HB_LOG" "publish_backend mac ready"
+assert_contains "heartbeat -> keeps routing to the Mac" "$HB_LOG" "route_active mac"
+if [ "$(grep -c 'publish_backend' "$HB_LOG")" -ge 2 ]; then pass "heartbeat -> repeats while the bake runs"
+else fail "heartbeat -> repeats while the bake runs" "$(cat "$HB_LOG")"; fi
+if [ "$(cat "$WORK/hb_n1")" = "$(cat "$WORK/hb_n2")" ]; then pass "heartbeat -> stops when the bake returns"
+else fail "heartbeat -> stops when the bake returns" "$(cat "$WORK/hb_n1") -> $(cat "$WORK/hb_n2") lines"; fi
+
 if [ "$FAIL" -eq 0 ]; then
   echo "ALL PASS"
   exit 0

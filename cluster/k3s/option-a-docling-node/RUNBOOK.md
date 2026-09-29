@@ -35,7 +35,7 @@ everything; every mutating step accepts `--dry-run`.
 | `docling-node.sh` | `setup`, `bake`, `up`, `down`, `status`, `tick`, `reap` |
 | `apps/pageindex-mcp/docling-node-controller.yaml` | in-cluster loop running `tick` every 30 s, with its RBAC |
 | `server-private-net.yaml` | k3s drop-in for portfolio: node-ip/flannel on the private NIC, public IP kept as ExternalIP and cert SAN |
-| `cloud-init-docling-agent.yaml` | first-boot user-data for `bake`: joins as agent, builds the image from the public repo, imports it into containerd, removes docker |
+| `cloud-init-docling-agent.yaml` | first-boot user-data for `bake --full`: joins as agent, builds the image from the public repo, imports it into containerd, removes docker |
 | `apps/pageindex-mcp/docling-service-deployment.yaml` | `docling-service` Deployment, pinned to docling-1 (no portfolio copy -- NG7) |
 | `apps/pageindex-mcp/docling-service-public.yaml` | Certificate, IngressRoute + rate limit, egress NetworkPolicy |
 
@@ -87,27 +87,41 @@ with nothing run by hand:
    sees the newest snapshot's `pageindex-sha` label differs and runs `bake <sha>`.
    At most `DOCLING_BAKE_MAX_ATTEMPTS` (2) tries per sha (`bake-tries-<sha7>`).
 
-`bake` creates docling-1 as a **cx33** (`DOCLING_BAKE_TYPE`; its 80 GB disk
-becomes the snapshot's minimum, which every `up` candidate has) in the first of
-hel1/fsn1/nbg1 that works, builds `services/docling-service/Dockerfile` at that
-commit **on the node** (~15–30 min), imports it into containerd as
-`docling-service:<sha7>`, snapshots the server (label `docling-node=snapshot`,
-`pageindex-sha=<sha7>`) and deletes the server. A bake that fails part-way deletes
-its server. The previous snapshot is kept as a rollback; older ones are deleted.
-Cost: about EUR 0.01 of cx33 time per bake.
+`bake` is a **refresh** by default: it creates docling-1 as a **cx33**
+(`DOCLING_BAKE_TYPE`) from the newest snapshot in the first of hel1/fsn1/nbg1 that
+works, so k3s and the agent config are already there. It pulls the image CI pushed,
+`ghcr.io/trehansalil/docling-service:sha-<sha>` (`DOCLING_IMAGE_REPO`; public, no
+pull secret), tags it `docling-service:<sha7>`, removes the previous
+docling-service image, snapshots the server (label `docling-node=snapshot`,
+`pageindex-sha=<sha7>`) and deletes the server. No get.k3s.io, no Docker build and
+no HF_TOKEN on the node; a few minutes instead of 15–30.
 
-While a bake runs (it holds the tick lock) failover is paused; a Mac outage that
-starts first delays the bake instead. Watch it with
-`kubectl -n pageindex-mcp logs deploy/docling-node-controller -c tick -f`.
+`bake --full <sha>` (and the first bake, with no snapshot yet) starts from stock
+ubuntu-24.04 instead: it installs k3s (get.k3s.io, falling back to the pinned
+`install.sh` on GitHub), builds `services/docling-service/Dockerfile` at that
+commit **on the node** (~15–30 min) and imports it into containerd. Use it for a
+k3s or OS upgrade. The cx33's 80 GB disk becomes the snapshot's minimum, which
+every `up` candidate has.
+
+Either way, a bake that fails part-way deletes its server, and the previous
+snapshot is kept as a rollback; older ones are deleted. Cost: about EUR 0.01 of
+cx33 time per bake.
+
+A bake holds the tick lock, so failover to docling-1 is paused; a Mac outage that
+starts first delays the bake instead. Meanwhile a background heartbeat
+(`DOCLING_BAKE_HEARTBEAT_S`, 30 s) keeps routing and `docling:backend` current, so
+the worker keeps converting on the Mac (on 2026-09-29, before the heartbeat,
+`docling:backend` expired and the worker refused every job for the whole bake).
+Watch it with `kubectl -n pageindex-mcp logs deploy/docling-node-controller -c tick -f`.
 
 **Roll back** to the previous snapshot: delete the newest
 (`hcloud image list --selector docling-node=snapshot`), and stop the tick from
 re-baking it: `kubectl -n pageindex-mcp patch configmap docling-node-state --type merge -p '{"data":{"bake-tries-<sha7>":"99"}}'`.
-**Bake by hand** (any sha): `./docling-node.sh bake <full pageindex sha>`, or run the
+**Bake by hand** (any sha): `./docling-node.sh bake [--full] <full pageindex sha>`, or run the
 deploy workflow for `docling-service` with image tag `sha-<full sha>`.
 
-The model download uses `HF_TOKEN` (the controller gets it from `pageindex-mcp-secrets`
-as env) when set, anonymous otherwise. `bake` hands it to the node over SSH on the
+The `--full` model download uses `HF_TOKEN` (the controller gets it from `pageindex-mcp-secrets`
+as env) when set, anonymous otherwise. `bake --full` hands it to the node over SSH on the
 private network into `/run/hf_token` (tmpfs); the Dockerfile reads it as a BuildKit
 secret, so it is not in user-data, the image layers or the snapshot. The controller's
 SSH key and the k3s join token come from the one-time Secret `docling-node-bake`
