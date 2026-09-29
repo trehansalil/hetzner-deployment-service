@@ -119,7 +119,12 @@ SSH_KEY=${DOCLING_SSH_KEY:-/root/.ssh/docling_node}
 # disk size, and `up` can only boot it on types with at least that disk
 # (cx33 = 80 GB fits every candidate in NODE_TYPES).
 BAKE_TYPE=${DOCLING_BAKE_TYPE:-cx33}
-# Automatic re-bake (`tick`): at most this many attempts per pageindex sha.
+# `tick` re-bakes on its own only when this is 1. Off (the default), a new
+# docling-service build is just recorded (bake-want) and the snapshot is
+# baked when someone asks: `bake-now` in docling-node-state, set by the
+# deploy workflow's `bake_docling_node` input, or `bake SHA` by hand.
+AUTO_BAKE=${DOCLING_AUTO_BAKE:-0}
+# Re-bake from `tick`: at most this many attempts per pageindex sha.
 BAKE_MAX_ATTEMPTS=${DOCLING_BAKE_MAX_ATTEMPTS:-2}
 # Where a refresh bake pulls `sha-<sha>` from: build-push-docling-service.yml
 # (pageindex) pushes every master build here, and the package is public.
@@ -1017,7 +1022,8 @@ publish_backend() {  # publish_backend TARGET PHASE REASON [ETA_S]
 
 # Controller state that must survive a pod restart, in ConfigMap
 # docling-node-state: autostarts-<date> (the daily cap), bake-want (the
-# pageindex sha deploy.yml asks to bake) and bake-tries-<method>-<sha7>.
+# newest docling-service build deploy.yml recorded), bake-now (a sha someone
+# asked to bake) and bake-tries-<method>-<sha7>.
 state_get() {  # state_get KEY -> value or empty
   kubectl -n "$NS" get configmap "$STATE_CM" -o json 2>/dev/null \
     | jq -r --arg k "$1" '.data[$k] // empty' || true
@@ -1038,13 +1044,15 @@ state_set() {  # state_set KEY VALUE; drops autostarts-* keys of other days
 autostarts_today() { local n; n=$(state_get "autostarts-$(date -u +%F)"); echo "${n:-0}"; }
 record_autostart() { state_set "autostarts-$(date -u +%F)" $(( $(autostarts_today) + 1 )); }
 
-# Re-bake when deploy.yml has recorded a newer docling-service build than the
-# snapshot's. Only while nothing else needs the node: the Mac answers, no
+# Re-bake when asked (bake-now), or with AUTO_BAKE=1 when deploy.yml has
+# recorded a newer docling-service build (bake-want) than the snapshot's.
+# Only while nothing else needs the node: the Mac answers, no
 # docling-1 exists. The bake holds the tick's lock (~20-30 min), so failover
 # is paused meanwhile; a Mac that fails first delays the bake instead.
 maybe_bake() {
   local want have tries
-  want=$(state_get bake-want)
+  want=$(state_get bake-now)
+  [ -n "$want" ] || [ "$AUTO_BAKE" != 1 ] || want=$(state_get bake-want)
   [ -n "$want" ] || return 0
   have=$(hcloud image list --type snapshot --selector "$SNAP_SELECTOR" -o json \
     | jq -r 'sort_by(.created) | last | .labels["pageindex-sha"] // empty')

@@ -44,6 +44,11 @@ on:
         description: 'Image tag (SHA or latest)'
         required: false
         default: 'latest'
+      bake_docling_node:
+        description: 'docling-service only: re-bake the docling-1 snapshot at this sha-<full sha> tag (a cx33 for a few minutes, run while the Mac is serving)'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   deploy:
@@ -262,15 +267,21 @@ jobs:
           # NG7: no portfolio-local copy to point at ghcr. The docling-1 copy
           # runs the image baked into the node snapshot (`docling-node.sh up`
           # pins it); a ghcr tag there would leave the node in ImagePullBackOff.
-          # Ask docling-node-controller to re-bake the docling-1 snapshot at
-          # this commit (it bakes on its next idle tick; see docling-node.sh
-          # maybe_bake). Only for a full-sha tag, not `latest`.
+          # Record this build for docling-node-controller (bake-want). It
+          # re-bakes the docling-1 snapshot on its own only with
+          # DOCLING_AUTO_BAKE=1; otherwise only when bake_docling_node asks
+          # (bake-now; it bakes on its next tick with the Mac serving, see
+          # docling-node.sh maybe_bake). Only for a full-sha tag, not `latest`.
           SHA="${IMAGE_TAG#sha-}"
           if [[ "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            KEYS="\"bake-want\":\"$SHA\""
+            [ "$BAKE_NOW" != true ] || KEYS="$KEYS,\"bake-now\":\"$SHA\""
             kubectl -n pageindex-mcp create configmap docling-node-state 2>/dev/null || true
             kubectl -n pageindex-mcp patch configmap docling-node-state --type merge \
-              -p "{\"data\":{\"bake-want\":\"$SHA\"}}"
-            echo "docling-1 snapshot re-bake requested at $SHA"
+              -p "{\"data\":{$KEYS}}"
+            echo "docling-service build recorded at $SHA (bake now: ${BAKE_NOW:-false})"
+          elif [ "$BAKE_NOW" = true ]; then
+            echo "::error::bake_docling_node needs image_tag sha-<full 40-char sha>"; exit 1
           fi
           # Recreate strategy: expect a short conversion outage; worker jobs in
           # flight fail over per the worker's remote-call timeout/retry handling.
@@ -284,6 +295,7 @@ jobs:
           fi
         env:
           IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
+          BAKE_NOW: ${{ github.event.inputs.bake_docling_node }}
 
       - name: Update image tag (rolling deploy) — neonatal-care
         if: steps.vars.outputs.app == 'neonatal-care'
