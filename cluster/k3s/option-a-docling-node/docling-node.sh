@@ -3,9 +3,12 @@
 #
 #   setup            one-time: private network, firewalls, DNS record, SSH key,
 #                    and the portfolio k3s private-net drop-in (restarts k3s)
-#   bake SHA         create docling-1 (cx33), build the docling-service image
-#                    on it, snapshot it, delete it. Automatic: `tick` bakes
-#                    each docling-service build deploy.yml records
+#   bake SHA         boot docling-1 (cx33) from the newest snapshot, pull the
+#                    docling-service image CI pushed to GHCR (sha-SHA),
+#                    snapshot it, delete it. Automatic: `tick` bakes each
+#                    docling-service build deploy.yml records
+#   bake --full SHA  the same from a stock ubuntu-24.04: installs k3s and
+#                    builds the image on the node (first bake, k3s/OS upgrades)
 #   up               create docling-1 from the newest snapshot and join it
 #   down             drain and delete docling-1 (billing stops; snapshot kept)
 #   status           what exists right now and what it costs
@@ -118,6 +121,13 @@ SSH_KEY=${DOCLING_SSH_KEY:-/root/.ssh/docling_node}
 BAKE_TYPE=${DOCLING_BAKE_TYPE:-cx33}
 # Automatic re-bake (`tick`): at most this many attempts per pageindex sha.
 BAKE_MAX_ATTEMPTS=${DOCLING_BAKE_MAX_ATTEMPTS:-2}
+# Where a refresh bake pulls `sha-<sha>` from: build-push-docling-service.yml
+# (pageindex) pushes every master build here, and the package is public.
+IMAGE_REPO=${DOCLING_IMAGE_REPO:-ghcr.io/trehansalil/docling-service}
+# A bake holds the tick lock, so no tick refreshes docling:backend meanwhile;
+# a background loop re-publishes it this often (well under BACKEND_TTL_S).
+BAKE_HEARTBEAT_S=${DOCLING_BAKE_HEARTBEAT_S:-30}
+HEARTBEAT_PID=
 SNAP_SELECTOR=docling-node=snapshot
 ZONE=saliltrehan.com
 RECORD=docling
@@ -133,6 +143,7 @@ STARTING=0
 trap 'rc=$?; if [ "$rc" != 0 ] && [ "$BAKING$STARTING" != 00 ]; then
   what=bake; [ "$STARTING" = 1 ] && what=up
   BAKING=0; STARTING=0; log "$what failed (exit $rc): deleting $NODE"; cmd_down || true; fi
+  [ -z "$HEARTBEAT_PID" ] || kill "$HEARTBEAT_PID" 2>/dev/null || true
   rm -rf "$TMP"' EXIT
 # The controller's `timeout` sends TERM. Untrapped, bash still runs the EXIT
 # trap but with $? = 0, so the cleanup above would be skipped.
@@ -297,13 +308,63 @@ cmd_setup() {
 }
 
 cmd_bake() {
+  local full=0
+  [ "${1:-}" = --full ] && { full=1; shift; }
   local sha=${1:-}
-  [ -n "$sha" ] || die "usage: bake <pageindex commit sha> (full 40-char sha)"
+  [ -n "$sha" ] || die "usage: bake [--full] <pageindex commit sha> (full 40-char sha)"
   [ "${#sha}" = 40 ] || die "give the full 40-char sha"
   exists_server "$NODE" && die "$NODE already exists; run '$0 down' first"
   exists_network "$NET" || die "run '$0 setup' first"
-
   need ssh
+
+  # Default: refresh. Boot the newest snapshot (k3s and the agent config are
+  # already on its disk) and pull the image CI pushed to GHCR, so a bake needs
+  # neither get.k3s.io nor a Docker build on the node. --full, or no snapshot
+  # yet, rebuilds from a stock image (k3s or OS upgrades).
+  local snap=
+  [ "$full" = 1 ] || snap=$(newest_snapshot)
+  if [ -n "$snap" ]; then bake_refresh "$sha" "$snap"; else bake_full "$sha"; fi
+}
+
+bake_refresh() {  # bake_refresh SHA SNAPSHOT_ID
+  local sha=$1 snap=$2
+  local src="$IMAGE_REPO:sha-$sha"
+  # The name `docker save | ctr import` gave the full bake's image, which the
+  # Deployment's `docling-service:<sha7>` resolves to.
+  local tag="docker.io/library/docling-service:${sha:0:7}"
+  local loc created=
+  for loc in $NODE_LOCATIONS; do
+    log "Create $NODE ($BAKE_TYPE, snapshot $snap, $loc) to pull $src — billing starts"
+    BAKING=1
+    if run hcloud server create --name "$NODE" --type "$BAKE_TYPE" --image "$snap" \
+        --location "$loc" --ssh-key "$SSH_KEY_NAME" --firewall "$FW_NODE" \
+        --label role=k3s-agent --label workload=docling --start-after-create=false </dev/null; then
+      created=$loc; break
+    fi
+    exists_server "$NODE" && run hcloud server delete "$NODE"
+  done
+  [ -n "$created" ] || { BAKING=0; die "$BAKE_TYPE could not be created in any of [$NODE_LOCATIONS]"; }
+  # Attach before the first boot: the snapshot's k3s config pins node-ip.
+  run hcloud server attach-to-network "$NODE" --network "$NET" --ip "$NODE_PRIV_IP"
+  run hcloud server poweron "$NODE"
+  wait_for 300 "$NODE Ready" node_ready
+  wait_for 300 "SSH on $NODE" ssh_node true
+  # docling-service stays at 0 replicas (cmd_down), so nothing is scheduled
+  # here meanwhile. Drop every other docling-service image so the snapshot,
+  # billed per GB, holds one.
+  log "Pull $src into $NODE's containerd as $tag"
+  run ssh_node "set -e; c='k3s ctr -n k8s.io images'
+    \$c pull '$src'
+    \$c tag --force '$src' '$tag'
+    for old in \$(\$c ls -q | grep -E '(^|/)docling-service[:@]' | grep -vxF -e '$tag' -e '$src'); do
+      \$c rm \"\$old\"
+    done
+    \$c rm '$src'"
+  bake_snapshot "$sha"
+}
+
+bake_full() {  # bake_full SHA
+  local sha=$1
   # The controller gets the join token from Secret docling-node-bake.
   local k3s_token=${DOCLING_K3S_TOKEN:-}
   [ -n "$k3s_token" ] || k3s_token=$(cat /var/lib/rancher/k3s/server/node-token)
@@ -354,7 +415,11 @@ cmd_bake() {
   wait_for 2700 "image build + import on $NODE" ssh_node test -f /var/lib/docling-bake.done
   [ "$DRY_RUN" = 1 ] || ssh_node tail -3 /var/log/docling-bake.log
   wait_for 300 "$NODE Ready" node_ready
+  bake_snapshot "$sha"
+}
 
+bake_snapshot() {  # bake_snapshot SHA: pin the Deployment, snapshot docling-1, delete it
+  local sha=$1
   local tag="docling-service:${sha:0:7}"
   # docling-1 runs the baked image; `up` re-pins it from the snapshot.
   log "Point the docling-service Deployment at $tag"
@@ -992,7 +1057,33 @@ maybe_bake() {
   fi
   state_set "bake-tries-${want:0:7}" $(( tries + 1 ))
   log "tick: snapshot is ${have:-none}, docling-service ${want:0:7} was built -- baking (attempt $(( tries + 1 ))/$BAKE_MAX_ATTEMPTS)"
+  # 2026-09-29: with no heartbeat, docling:backend expired ~2 min into a bake
+  # and the worker's readiness gate refused every conversion for the whole
+  # bake, although the Mac was serving.
+  bake_heartbeat &
+  HEARTBEAT_PID=$!
   cmd_bake "$want"
+  kill "$HEARTBEAT_PID" 2>/dev/null || true
+  HEARTBEAT_PID=
+}
+
+bake_heartbeat() {  # background, while a bake holds the tick lock
+  # Stands in for the ticks the lock skips: route and publish the Mac as a
+  # tick would. A Mac that fails meanwhile is routed to none (no blackhole);
+  # failover to docling-1 still waits for the bake to end.
+  local parent=$$
+  while kill -0 "$parent" 2>/dev/null; do
+    # set -e is inherited: one failed kubectl or Redis write must not end
+    # the loop for the rest of the bake.
+    if mac_ok; then
+      route_active mac || true
+      publish_backend mac ready "" || true
+    else
+      route_active none || true
+      publish_backend mac down "mac probe failed during a bake" || true
+    fi
+    sleep "$BAKE_HEARTBEAT_S"
+  done
 }
 
 cmd_tick() {
@@ -1162,7 +1253,7 @@ case "${1:-}" in
   reap) cmd_reap ;;
   tick) cmd_tick ;;
   reaper) shift; cmd_reaper "$@" ;;
-  *) sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+  *) sed -n '2,43p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac
 
 fi # BASH_SOURCE guard

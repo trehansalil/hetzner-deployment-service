@@ -1,6 +1,6 @@
 #cloud-config
 # First-boot user-data for the on-demand docling agent `docling-1` (cx33,
-# hel1), used ONLY by `docling-node.sh bake`. `up` boots from the resulting
+# hel1), used ONLY by `docling-node.sh bake --full` (and a first bake with no snapshot). `up` boots from the resulting
 # snapshot with no user-data: the agent config and the image are on its disk.
 #
 # docling-node.sh renders a 0600 copy outside the repo, replacing:
@@ -51,8 +51,15 @@ write_files:
       done
       IFACE=$(ip -o -4 addr show | awk '$4 ~ /^10\.0\.0\.3\// {print $2; exit}')
       echo "flannel-iface: \"$IFACE\"" >> /etc/rancher/k3s/config.yaml
-      curl -sfL https://get.k3s.io | \
-        INSTALL_K3S_VERSION="v1.34.5+k3s1" INSTALL_K3S_EXEC="agent" sh -
+      # Fetch the installer to a file, not `curl | sh`: without pipefail a
+      # failed download ran an empty script and the bake died much later at
+      # `k3s: not found` (2026-09-29, get.k3s.io HTTP 500 / Cloudflare 1101).
+      # The same script is on GitHub, pinned to the version installed.
+      curl -sfL -o /tmp/k3s-install.sh https://get.k3s.io \
+        || curl -sfL -o /tmp/k3s-install.sh \
+             "https://raw.githubusercontent.com/k3s-io/k3s/v1.34.5%2Bk3s1/install.sh"
+      INSTALL_K3S_VERSION="v1.34.5+k3s1" INSTALL_K3S_EXEC="agent" sh /tmp/k3s-install.sh
+      command -v k3s >/dev/null
       # Build the image here from the public repo (no credentials) and hand it
       # to the agent's containerd, so no registry pull secret is needed.
       git clone --quiet https://github.com/trehansalil/pageindex /opt/src
