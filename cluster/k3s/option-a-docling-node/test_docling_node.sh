@@ -374,6 +374,26 @@ else fail "heartbeat -> repeats while the bake runs" "$(cat "$HB_LOG")"; fi
 if [ "$(cat "$WORK/hb_n1")" = "$(cat "$WORK/hb_n2")" ]; then pass "heartbeat -> stops when the bake returns"
 else fail "heartbeat -> stops when the bake returns" "$(cat "$WORK/hb_n1") -> $(cat "$WORK/hb_n2") lines"; fi
 
+echo "== maybe_bake: attempt budget is per sha and method =="
+budget_run() {  # budget_run SNAPSHOT_SHA TRIES_KEY TRIES -> "baked" or "skipped"
+  ( source "$SCRIPT"; set +e +u +o pipefail
+    SNAP_HAVE=$1 TK=$2 TN=$3
+    state_get() { case "$1" in bake-want) echo "$BAKE_SHA" ;; "$TK") echo "$TN" ;; esac; }
+    state_set() { :; }; exists_server() { return 1; }; bake_heartbeat() { :; }
+    hcloud() { [ -n "$SNAP_HAVE" ] && echo "[{\"created\":\"1\",\"labels\":{\"pageindex-sha\":\"$SNAP_HAVE\"}}]" || echo '[]'; }
+    cmd_bake() { echo baked; }
+    maybe_bake ) 2>/dev/null | grep -q baked && echo baked || echo skipped
+}
+[ "$(budget_run e0a7efb bake-tries-abcdef1 2)" = baked ] \
+  && pass "budget -> a sha spent by old --full bakes gets a refresh" \
+  || fail "budget -> a sha spent by old --full bakes gets a refresh" "skipped"
+[ "$(budget_run e0a7efb bake-tries-refresh-abcdef1 2)" = skipped ] \
+  && pass "budget -> refresh stops after its own attempts" \
+  || fail "budget -> refresh stops after its own attempts" "baked"
+[ "$(budget_run "" bake-tries-full-abcdef1 2)" = skipped ] \
+  && pass "budget -> --full (no snapshot) stops after its own attempts" \
+  || fail "budget -> --full (no snapshot) stops after its own attempts" "baked"
+
 if [ "$FAIL" -eq 0 ]; then
   echo "ALL PASS"
   exit 0
