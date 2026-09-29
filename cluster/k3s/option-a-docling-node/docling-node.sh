@@ -1017,7 +1017,7 @@ publish_backend() {  # publish_backend TARGET PHASE REASON [ETA_S]
 
 # Controller state that must survive a pod restart, in ConfigMap
 # docling-node-state: autostarts-<date> (the daily cap), bake-want (the
-# pageindex sha deploy.yml asks to bake) and bake-tries-<sha>.
+# pageindex sha deploy.yml asks to bake) and bake-tries-<method>-<sha7>.
 state_get() {  # state_get KEY -> value or empty
   kubectl -n "$NS" get configmap "$STATE_CM" -o json 2>/dev/null \
     | jq -r --arg k "$1" '.data[$k] // empty' || true
@@ -1050,13 +1050,20 @@ maybe_bake() {
     | jq -r 'sort_by(.created) | last | .labels["pageindex-sha"] // empty')
   [ "${want:0:7}" != "$have" ] || return 0
   exists_server "$NODE" && return 0
-  tries=$(state_get "bake-tries-${want:0:7}"); tries=${tries:-0}
+  # The attempt budget is per sha AND per method (cmd_bake refreshes when a
+  # snapshot exists, else runs --full). A sha whose --full bakes failed (the
+  # pre-refresh controller's bake-tries-<sha7>) so gets a fresh refresh budget
+  # the moment this code deploys, with nothing reset by hand.
+  local method=full key
+  [ -z "$have" ] || method=refresh
+  key="bake-tries-$method-${want:0:7}"
+  tries=$(state_get "$key"); tries=${tries:-0}
   if [ "$tries" -ge "$BAKE_MAX_ATTEMPTS" ]; then
-    log "tick: bake of ${want:0:7} failed $tries times -- not retrying (snapshot stays ${have:-none})"
+    log "tick: $method bake of ${want:0:7} failed $tries times -- not retrying (snapshot stays ${have:-none})"
     return 0
   fi
-  state_set "bake-tries-${want:0:7}" $(( tries + 1 ))
-  log "tick: snapshot is ${have:-none}, docling-service ${want:0:7} was built -- baking (attempt $(( tries + 1 ))/$BAKE_MAX_ATTEMPTS)"
+  state_set "$key" $(( tries + 1 ))
+  log "tick: snapshot is ${have:-none}, docling-service ${want:0:7} was built -- $method bake (attempt $(( tries + 1 ))/$BAKE_MAX_ATTEMPTS)"
   # 2026-09-29: with no heartbeat, docling:backend expired ~2 min into a bake
   # and the worker's readiness gate refused every conversion for the whole
   # bake, although the Mac was serving.

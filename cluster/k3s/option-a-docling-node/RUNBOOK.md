@@ -85,7 +85,11 @@ with nothing run by hand:
 2. `deploy.yml` records the sha as `bake-want` in ConfigMap `docling-node-state`.
 3. On its next tick with the Mac healthy and no docling-1, `docling-node-controller`
    sees the newest snapshot's `pageindex-sha` label differs and runs `bake <sha>`.
-   At most `DOCLING_BAKE_MAX_ATTEMPTS` (2) tries per sha (`bake-tries-<sha7>`).
+   At most `DOCLING_BAKE_MAX_ATTEMPTS` (2) tries per sha and method
+   (`bake-tries-refresh-<sha7>`, or `bake-tries-full-<sha7>` when no snapshot exists).
+   A sha that ran out of tries under the old from-scratch bake (key
+   `bake-tries-<sha7>`) is therefore retried as a refresh as soon as this
+   controller deploys.
 
 `bake` is a **refresh** by default: it creates docling-1 as a **cx33**
 (`DOCLING_BAKE_TYPE`) from the newest snapshot in the first of hel1/fsn1/nbg1 that
@@ -116,7 +120,7 @@ Watch it with `kubectl -n pageindex-mcp logs deploy/docling-node-controller -c t
 
 **Roll back** to the previous snapshot: delete the newest
 (`hcloud image list --selector docling-node=snapshot`), and stop the tick from
-re-baking it: `kubectl -n pageindex-mcp patch configmap docling-node-state --type merge -p '{"data":{"bake-tries-<sha7>":"99"}}'`.
+re-baking it: `kubectl -n pageindex-mcp patch configmap docling-node-state --type merge -p '{"data":{"bake-tries-refresh-<sha7>":"99"}}'`.
 **Bake by hand** (any sha): `./docling-node.sh bake [--full] <full pageindex sha>`, or run the
 deploy workflow for `docling-service` with image tag `sha-<full sha>`.
 
