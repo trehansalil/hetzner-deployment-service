@@ -75,21 +75,28 @@ kubectl apply -n pageindex-mcp -f apps/pageindex-mcp/service.yaml \
 
 `docling-service` sits at 0 replicas until `up` sizes it to docling-1 and scales it to 1; `down` scales it back to 0.
 
-## 2. Bake the image (automatic)
+## 2. Bake the image (on request)
 
-Every docling-service build on pageindex `master` re-bakes the docling-1 snapshot
-with nothing run by hand:
+The docling-1 snapshot is re-baked **only when asked** (`DOCLING_AUTO_BAKE=0` in
+`docling-node-controller.yaml`), so a docling-service merge costs no server time:
 
 1. `build-push-docling-service.yml` (pageindex) runs the quality gates, pushes the
    GHCR image and dispatches `docling-service-image-updated` with `sha-<sha>`.
 2. `deploy.yml` records the sha as `bake-want` in ConfigMap `docling-node-state`.
-3. On its next tick with the Mac healthy and no docling-1, `docling-node-controller`
-   sees the newest snapshot's `pageindex-sha` label differs and runs `bake <sha>`.
-   At most `DOCLING_BAKE_MAX_ATTEMPTS` (2) tries per sha and method
+   Nothing is baked; docling-1 keeps its older image until someone asks.
+3. **To bake:** run the *Deploy to Hetzner* workflow with app `docling-service`,
+   image tag `sha-<full pageindex sha>` and **bake_docling_node** ticked
+   (`gh workflow run deploy.yml -f app=docling-service -f image_tag=sha-<sha> -f bake_docling_node=true`).
+   That sets `bake-now`, and on its next tick with the Mac serving and no docling-1,
+   `docling-node-controller` runs `bake <sha>` unless the snapshot already has it.
+   Best done while the Mac is up: conversions keep running on it during the bake.
+4. At most `DOCLING_BAKE_MAX_ATTEMPTS` (2) tries per sha and method
    (`bake-tries-refresh-<sha7>`, or `bake-tries-full-<sha7>` when no snapshot exists).
    A sha that ran out of tries under the old from-scratch bake (key
-   `bake-tries-<sha7>`) is therefore retried as a refresh as soon as this
-   controller deploys.
+   `bake-tries-<sha7>`) gets a fresh budget as a refresh.
+
+Setting `DOCLING_AUTO_BAKE` to `"1"` restores the old behaviour: every recorded
+build (`bake-want`) is baked on the next idle tick.
 
 `bake` is a **refresh** by default: it creates docling-1 as a **cx33**
 (`DOCLING_BAKE_TYPE`) from the newest snapshot in the first of hel1/fsn1/nbg1 that
