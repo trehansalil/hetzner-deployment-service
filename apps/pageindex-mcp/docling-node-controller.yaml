@@ -190,6 +190,10 @@ spec:
                   optional: true
             - name: DOCLING_SSH_KEY
               value: /bake/ssh-key
+            # "0": no bake on a new docling-service build; bake on request
+            # (deploy workflow, app docling-service, bake_docling_node).
+            - name: DOCLING_AUTO_BAKE
+              value: "0"
             # Model download during bake; anonymous (rate-limited) when unset.
             - name: HF_TOKEN
               valueFrom:

@@ -356,7 +356,7 @@ HB_LOG="$WORK/heartbeat.log"
 (
   source "$SCRIPT"; set +e +u +o pipefail
   BAKE_HEARTBEAT_S=0.1
-  state_get() { [ "$1" = bake-want ] && echo "$BAKE_SHA" || echo 0; }
+  state_get() { [ "$1" = bake-now ] && echo "$BAKE_SHA" || echo 0; }
   state_set() { :; }
   hcloud() { echo '[]'; }; exists_server() { return 1; }; mac_ok() { return 0; }
   route_active() { echo "route_active $*" >> "$HB_LOG"; }
@@ -373,6 +373,40 @@ if [ "$(grep -c 'publish_backend' "$HB_LOG")" -ge 2 ]; then pass "heartbeat -> r
 else fail "heartbeat -> repeats while the bake runs" "$(cat "$HB_LOG")"; fi
 if [ "$(cat "$WORK/hb_n1")" = "$(cat "$WORK/hb_n2")" ]; then pass "heartbeat -> stops when the bake returns"
 else fail "heartbeat -> stops when the bake returns" "$(cat "$WORK/hb_n1") -> $(cat "$WORK/hb_n2") lines"; fi
+
+echo "== maybe_bake: attempt budget is per sha and method =="
+budget_run() {  # budget_run SNAPSHOT_SHA TRIES_KEY TRIES [AUTO WANT_KEY] -> "baked" or "skipped"
+  ( source "$SCRIPT"; set +e +u +o pipefail
+    SNAP_HAVE=$1 TK=$2 TN=$3 AUTO_BAKE=${4:-0} WK=${5:-bake-now}
+    state_get() { case "$1" in "$WK") echo "$BAKE_SHA" ;; "$TK") echo "$TN" ;; esac; }
+    state_set() { :; }; exists_server() { return 1; }; bake_heartbeat() { :; }
+    hcloud() { [ -n "$SNAP_HAVE" ] && echo "[{\"created\":\"1\",\"labels\":{\"pageindex-sha\":\"$SNAP_HAVE\"}}]" || echo '[]'; }
+    cmd_bake() { echo baked; }
+    maybe_bake ) 2>/dev/null | grep -q baked && echo baked || echo skipped
+}
+[ "$(budget_run e0a7efb bake-tries-abcdef1 2)" = baked ] \
+  && pass "budget -> a sha spent by old --full bakes gets a refresh" \
+  || fail "budget -> a sha spent by old --full bakes gets a refresh" "skipped"
+[ "$(budget_run e0a7efb bake-tries-refresh-abcdef1 2)" = skipped ] \
+  && pass "budget -> refresh stops after its own attempts" \
+  || fail "budget -> refresh stops after its own attempts" "baked"
+[ "$(budget_run "" bake-tries-full-abcdef1 2)" = skipped ] \
+  && pass "budget -> --full (no snapshot) stops after its own attempts" \
+  || fail "budget -> --full (no snapshot) stops after its own attempts" "baked"
+
+echo "== maybe_bake: automatic re-bake is off unless DOCLING_AUTO_BAKE=1 =="
+[ "$(budget_run e0a7efb none 0 0 bake-want)" = skipped ] \
+  && pass "auto off -> a new build alone (bake-want) does not bake" \
+  || fail "auto off -> a new build alone (bake-want) does not bake" "baked"
+[ "$(budget_run e0a7efb none 0 1 bake-want)" = baked ] \
+  && pass "auto on -> a new build (bake-want) bakes" \
+  || fail "auto on -> a new build (bake-want) bakes" "skipped"
+[ "$(budget_run e0a7efb none 0 0 bake-now)" = baked ] \
+  && pass "auto off -> a request (bake-now) bakes" \
+  || fail "auto off -> a request (bake-now) bakes" "skipped"
+[ "$(budget_run abcdef1 none 0 0 bake-now)" = skipped ] \
+  && pass "request already baked -> no bake" \
+  || fail "request already baked -> no bake" "baked"
 
 if [ "$FAIL" -eq 0 ]; then
   echo "ALL PASS"
