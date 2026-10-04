@@ -498,9 +498,11 @@ size_pod_to_node() {
 # "type location eur_per_h" lines, best first: in stock right now, x86, disk
 # >= the snapshot's, price <= MAX_EUR_H. Types outrank locations: a worse
 # type is tried only after the preferred one is out of stock everywhere.
+# Stock comes from the server type's own `locations[].available`: Hetzner
+# removed the datacenter endpoint (`hcloud datacenter list` now fails with
+# deprecated_api_endpoint), which used to carry it.
 node_candidates() {  # node_candidates SNAPSHOT_DISK_GB
   jq -rn --argjson st "$(hcloud server-type list -o json)" \
-    --argjson dc "$(hcloud datacenter list -o json)" \
     --arg types "$NODE_TYPES" --arg locs "$NODE_LOCATIONS" \
     --argjson cap "$MAX_EUR_H" --argjson disk "$1" '
     ($locs | split(" ") | map(select(. != ""))) as $L
@@ -510,7 +512,7 @@ node_candidates() {  # node_candidates SNAPSHOT_DISK_GB
     | $L[] as $l
     | ($s.prices[] | select(.location == $l) | .price_hourly.gross | tonumber) as $p
     | select($p <= $cap)
-    | select(any($dc[]; .location.name == $l and (.server_types.available | index($s.id)) != null))
+    | select(any($s.locations[]?; .name == $l and .available == true))
     | "\($t) \($l) \($p * 10000 | round / 10000)"'
 }
 
@@ -655,7 +657,7 @@ cmd_down() {
 
 cmd_status() {
   if exists_server "$NODE"; then
-    hcloud server describe "$NODE" -o json | jq -r '.datacenter.location.name as $loc |
+    hcloud server describe "$NODE" -o json | jq -r '(.location.name // .datacenter.location.name) as $loc |
       "server: \(.name) \(.server_type.name) \(.status) created \(.created)  (EUR \(.server_type.prices[] | select(.location == $loc) | .price_hourly.gross | tonumber * 10000 | round / 10000)/h while it exists)"'
   else
     echo "server: $NODE absent (not billing)"
