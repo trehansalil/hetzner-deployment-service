@@ -1110,6 +1110,9 @@ bake_heartbeat() {  # background, while a bake holds the tick lock
 }
 
 split_keep_node() {  # RFC-052 P5 11.1: docling-1 alongside a healthy Mac
+  # DOCLING_AUTOSTART=0 means "never start docling-1 on our own"; the split
+  # honours it like the Mac-down path does.
+  [ "$AUTOSTART" = 1 ] || return 0
   exists_server "$NODE" && return 0
   local d q r c f
   read -r d q r c f <<<"$(demand)"
@@ -1131,6 +1134,13 @@ split_keep_node() {  # RFC-052 P5 11.1: docling-1 alongside a healthy Mac
   ON_SERVER_CREATED=
   kill "$HEARTBEAT_PID" 2>/dev/null || true
   HEARTBEAT_PID=
+  # The Mac may have failed while cmd_up ran (the heartbeat then routed to
+  # none). docling-1 is up now: fail over to it at once, not a tick later.
+  if ! mac_ok && [ -n "$(node_pod_ip)" ]; then
+    log "split: Mac stopped answering while $NODE started -- routing to $NODE"
+    route_active node
+    publish_backend node ready ""
+  fi
 }
 
 cmd_tick() {
