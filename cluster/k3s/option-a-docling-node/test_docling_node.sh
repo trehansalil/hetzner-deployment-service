@@ -166,6 +166,7 @@ assert_not_contains "split on, DOCLING_AUTOSTART=0 -> not started" "$ORDER" "cmd
 split_tick 1 0 1 down
 assert_contains     "Mac lost during cmd_up -> fails over to the node" "$ORDER" "route_active node"
 assert_before       "fail-over comes after cmd_up" "$ORDER" "cmd_up called" "route_active node"
+assert_contains     "fail-over publishes node ready" "$ORDER" "publish_backend node ready"
 eval "$SAVED_FNS"   # later sections use the real functions
 
 echo "== cmd_reap orphan check (item 14, repair cycle 1) =="
