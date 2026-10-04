@@ -91,6 +91,14 @@ DAEMONSET_RESERVE_MEM_MI=${DOCLING_DAEMONSET_RESERVE_MEM_MI:-384}
 AUTOSTART=${DOCLING_AUTOSTART:-1}
 AUTOSTART_MAX_PER_DAY=${DOCLING_AUTOSTART_MAX_PER_DAY:-6}
 MAC_FAILS=${DOCLING_MAC_FAILS:-2}
+# RFC-052 P5 (task 11.1): with SPLIT_KEEP_NODE=1, a healthy Mac no longer
+# keeps docling-1 down: when conversion jobs are queued or running, docling-1
+# is started ALONGSIDE the Mac so the worker's split coordinator
+# (DOCLING_SPLIT_ENABLED=1 in pageindex-mcp) can give it a share of each
+# document. docling-active keeps pointing at the Mac. The daily autostart cap
+# and the end-of-hour idle reaper still bound the spend. Default 0: today's
+# one-backend behaviour, unchanged.
+SPLIT_KEEP_NODE=${DOCLING_SPLIT_KEEP_NODE:-0}
 MAC_SLICE=docling-service-mac-1
 ACTIVE_SVC=docling-active
 ACTIVE_SLICE=docling-active-1
@@ -1101,6 +1109,40 @@ bake_heartbeat() {  # background, while a bake holds the tick lock
   done
 }
 
+split_keep_node() {  # RFC-052 P5 11.1: docling-1 alongside a healthy Mac
+  # DOCLING_AUTOSTART=0 means "never start docling-1 on our own"; the split
+  # honours it like the Mac-down path does.
+  [ "$AUTOSTART" = 1 ] || return 0
+  exists_server "$NODE" && return 0
+  local d q r c f
+  read -r d q r c f <<<"$(demand)"
+  [ "$d" -gt 0 ] || return 0
+  local n; n=$(autostarts_today)
+  if [ "$n" -ge "$AUTOSTART_MAX_PER_DAY" ]; then
+    log "split: Mac up, $d job(s) waiting, but $n autostarts today (max $AUTOSTART_MAX_PER_DAY) -- not starting $NODE"
+    return 0
+  fi
+  log "split: Mac up and $d job(s) waiting (queued $q, running $r) -- starting $NODE alongside it ($n/$AUTOSTART_MAX_PER_DAY autostarts today)"
+  # Routing stays on the Mac: the split coordinator reaches docling-1 through
+  # its own Service. cmd_up holds the tick lock for ~100-150 s, longer than
+  # docling:backend's TTL, so the bake heartbeat keeps the Mac published
+  # meanwhile (otherwise the worker would refuse every conversion).
+  bake_heartbeat &
+  HEARTBEAT_PID=$!
+  ON_SERVER_CREATED=record_autostart
+  cmd_up
+  ON_SERVER_CREATED=
+  kill "$HEARTBEAT_PID" 2>/dev/null || true
+  HEARTBEAT_PID=
+  # The Mac may have failed while cmd_up ran (the heartbeat then routed to
+  # none). docling-1 is up now: fail over to it at once, not a tick later.
+  if ! mac_ok && [ -n "$(node_pod_ip)" ]; then
+    log "split: Mac stopped answering while $NODE started -- routing to $NODE"
+    route_active node
+    publish_backend node ready ""
+  fi
+}
+
 cmd_tick() {
   # --dry-run reads the probe counter to show the decision but never writes
   # it: the real timer's failover depends on it.
@@ -1120,6 +1162,7 @@ cmd_tick() {
   if [ "$fails" -eq 0 ]; then
     route_active mac
     publish_backend mac ready ""
+    [ "$SPLIT_KEEP_NODE" != 1 ] || split_keep_node
   elif [ -n "$(node_pod_ip)" ]; then
     route_active node
     publish_backend node ready ""

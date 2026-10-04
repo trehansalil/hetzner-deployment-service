@@ -133,6 +133,42 @@ assert_contains "cmd_tick -> publishes phase=starting"        "$ORDER" "publish_
 assert_contains "cmd_tick -> still calls cmd_up"              "$ORDER" "cmd_up called"
 assert_before   "cmd_tick -> starting published BEFORE cmd_up" "$ORDER" "publish_backend node starting" "cmd_up called"
 
+echo "== cmd_tick: RFC-052 P5 split keeps docling-1 up beside the Mac (11.1) =="
+SAVED_FNS="$(declare -f bake_heartbeat maybe_bake mac_ok autostarts_today demand exists_server \
+  route_active publish_backend cmd_up node_pod_ip)"
+split_tick() {  # split_tick KEEP_NODE CAP_USED [AUTOSTART] [MAC_AFTER_UP] -> $ORDER
+  # Self-contained: every function the Mac-up path reaches is stubbed here.
+  : > "$ORDER"
+  SPLIT_MAC_AFTER_UP=${4:-up}
+  rm -f "$WORK/split-up-done"
+  mac_ok() { [ ! -e "$WORK/split-up-done" ] || [ "$SPLIT_MAC_AFTER_UP" = up ]; }
+  node_pod_ip() { [ -e "$WORK/split-up-done" ] && echo 10.0.0.9; }
+  exists_server() { return 1; }
+  demand() { echo "1 1 0 0 0"; }
+  autostarts_today() { echo "$SPLIT_CAP_USED"; }
+  route_active() { echo "route_active $*" >> "$ORDER"; }
+  publish_backend() { echo "publish_backend $*" >> "$ORDER"; }
+  cmd_up() { echo "cmd_up called" >> "$ORDER"; touch "$WORK/split-up-done"; }
+  bake_heartbeat() { :; }
+  maybe_bake() { :; }
+  SPLIT_CAP_USED=$2 SPLIT_KEEP_NODE=$1 AUTOSTART=${3:-1} cmd_tick >/dev/null 2>&1
+}
+split_tick 1 0
+assert_contains     "split on, Mac up, demand -> docling-1 started" "$ORDER" "cmd_up called"
+assert_contains     "split on -> docling-active stays on the Mac"   "$ORDER" "route_active mac"
+assert_not_contains "split on -> never routed to the node"          "$ORDER" "route_active node"
+split_tick 0 0
+assert_not_contains "split off (default) -> Mac up never starts docling-1" "$ORDER" "cmd_up called"
+split_tick 1 "$AUTOSTART_MAX_PER_DAY"
+assert_not_contains "split on, daily cap reached -> not started" "$ORDER" "cmd_up called"
+split_tick 1 0 0
+assert_not_contains "split on, DOCLING_AUTOSTART=0 -> not started" "$ORDER" "cmd_up called"
+split_tick 1 0 1 down
+assert_contains     "Mac lost during cmd_up -> fails over to the node" "$ORDER" "route_active node"
+assert_before       "fail-over comes after cmd_up" "$ORDER" "cmd_up called" "route_active node"
+assert_contains     "fail-over publishes node ready" "$ORDER" "publish_backend node ready"
+eval "$SAVED_FNS"   # later sections use the real functions
+
 echo "== cmd_reap orphan check (item 14, repair cycle 1) =="
 # All five cases put the node into the same "reap-eligible, CPU busy" shape
 # (docling_mcpu overridden to a busy value; hcloud stubbed so the node reads
