@@ -133,6 +133,26 @@ assert_contains "cmd_tick -> publishes phase=starting"        "$ORDER" "publish_
 assert_contains "cmd_tick -> still calls cmd_up"              "$ORDER" "cmd_up called"
 assert_before   "cmd_tick -> starting published BEFORE cmd_up" "$ORDER" "publish_backend node starting" "cmd_up called"
 
+echo "== cmd_tick: RFC-052 P5 split keeps docling-1 up beside the Mac (11.1) =="
+SAVED_FNS="$(declare -f bake_heartbeat maybe_bake mac_ok autostarts_today)"
+split_tick() {  # split_tick KEEP_NODE CAP_USED -> the tick's order log
+  : > "$ORDER"
+  mac_ok() { return 0; }
+  bake_heartbeat() { :; }
+  maybe_bake() { :; }
+  autostarts_today() { echo "$SPLIT_CAP_USED"; }
+  SPLIT_CAP_USED=$2 SPLIT_KEEP_NODE=$1 cmd_tick >/dev/null 2>&1
+}
+split_tick 1 0
+assert_contains     "split on, Mac up, demand -> docling-1 started" "$ORDER" "cmd_up called"
+assert_contains     "split on -> docling-active stays on the Mac"   "$ORDER" "route_active mac"
+assert_not_contains "split on -> never routed to the node"          "$ORDER" "route_active node"
+split_tick 0 0
+assert_not_contains "split off (default) -> Mac up never starts docling-1" "$ORDER" "cmd_up called"
+split_tick 1 "$AUTOSTART_MAX_PER_DAY"
+assert_not_contains "split on, daily cap reached -> not started" "$ORDER" "cmd_up called"
+eval "$SAVED_FNS"   # later sections use the real bake functions
+
 echo "== cmd_reap orphan check (item 14, repair cycle 1) =="
 # All five cases put the node into the same "reap-eligible, CPU busy" shape
 # (docling_mcpu overridden to a busy value; hcloud stubbed so the node reads
