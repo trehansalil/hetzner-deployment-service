@@ -26,8 +26,8 @@ data:
   PAGEINDEX_MODEL: "gpt-4.1"
   # Per-stage models. The engine was tuned with the pre-filter and tree search
   # on the small tiers (gpt-5.4-mini / gpt-5.4-nano); the venki-test resource
-  # has only a gpt-4.1 deployment, so both run on gpt-4.1 until gpt-5-mini /
-  # gpt-5-nano are deployed there (2026-10-05).
+  # has only a gpt-4.1 deployment (as of 2026-10-05), so both run on gpt-4.1
+  # until gpt-5-mini / gpt-5-nano are deployed there.
   PAGEINDEX_FILTER_MODEL: "gpt-4.1"
   PAGEINDEX_SEARCH_MODEL: "gpt-4.1"
   PAGEINDEX_SEARCH_CONCURRENCY: "3"
