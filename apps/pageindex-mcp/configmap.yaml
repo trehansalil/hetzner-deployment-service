@@ -24,18 +24,19 @@ data:
   # pageindex library and overrides these to "azure/<deployment>" in
   # worker-deployment.yaml — litellm needs the provider prefix to route to Azure.
   PAGEINDEX_MODEL: "gpt-4.1"
-  # Per-stage models, as the engine was tuned: gpt-4.1 builds trees; the
-  # document pre-filter and the per-document tree search are one call each on
-  # the query path, so they run on the small, fast tiers.
-  PAGEINDEX_FILTER_MODEL: "gpt-5.4-mini"
-  PAGEINDEX_SEARCH_MODEL: "gpt-5.4-nano"
+  # Per-stage models. The engine was tuned with the pre-filter and tree search
+  # on the small tiers (gpt-5.4-mini / gpt-5.4-nano); the venki-test resource
+  # has only a gpt-4.1 deployment, so both run on gpt-4.1 until gpt-5-mini /
+  # gpt-5-nano are deployed there (2026-10-05).
+  PAGEINDEX_FILTER_MODEL: "gpt-4.1"
+  PAGEINDEX_SEARCH_MODEL: "gpt-4.1"
   PAGEINDEX_SEARCH_CONCURRENCY: "3"
   # Azure OpenAI routing for litellm (worker side). API version is non-sensitive.
   # NOTE (LLM-01): configure_litellm() derives AZURE_API_BASE from OPENAI_BASE_URL
   # and AZURE_API_KEY from OPENAI_API_KEY at runtime, so OPENAI_BASE_URL (in the
   # Secret) is the single source of truth and MUST equal AZURE_API_BASE below.
-  AZURE_API_BASE: "https://techlotus-openai-api.openai.azure.com"
-  AZURE_API_VERSION: "2025-01-01-preview"
+  AZURE_API_BASE: "https://venki-test-azureopenai.openai.azure.com"
+  AZURE_API_VERSION: "2024-08-01-preview"
   # Native math-library thread caps. Without these, torch/onnxruntime/BLAS spawn
   # one thread per host vCPU (~4 on this node), which both saturates ~2 cores (the
   # observed "2x CPU" spike) and inflates per-thread scratch arenas that push the
