@@ -2069,8 +2069,10 @@ data:
           # record docling_service_wedged once per episode -- choice
           # "unhealthy" when slots have leaked / a conversion is overdue for
           # DOCLING_WEDGE_GRACE_S (/health answers 503), and choice "restart"
-          # when it exits itself after DOCLING_WEDGE_RESTART_S. The Mac pushes
-          # to Loki directly (host="mac"); docling-1 is scraped by promtail.
+          # when it exits itself after DOCLING_WEDGE_RESTART_S. Both copies
+          # land as service="docling-service": the Mac pushes to Loki directly
+          # (stream_labels: host="mac"), and promtail maps docling-1's pod
+          # label app=docling-service to `service` (it sets pod, not host).
           - uid: docling-service-wedged
             title: docling-service wedged
             condition: C
@@ -2084,7 +2086,7 @@ data:
                   refId: A
                   queryType: instant
                   expr: >-
-                    sum by (host, choice) (count_over_time({service=~".+"}
+                    sum by (host, pod, choice) (count_over_time({service="docling-service"}
                     |= "docling_service_wedged" | json
                     | event="docling_service_wedged" [10m]))
               - refId: B
@@ -2113,13 +2115,13 @@ data:
             labels:
               severity: critical
               service: docling-service
-            # $$ escapes Grafana's env-var interpolation of provisioning files;
-            # the template engine then sees a single $labels.
+            # Rule annotations are exempt from provisioning's env-var
+            # interpolation, so $labels stays as written (no $$ escape).
             annotations:
-              summary: docling-service wedged on {{ $$labels.host }} ({{ $$labels.choice }})
+              summary: docling-service wedged on {{ $labels.host }}{{ $labels.pod }} ({{ $labels.choice }})
               description: >-
-                docling_service_wedged ({{ $$labels.choice }}) logged on
-                {{ $$labels.host }} in the last 10 min. unhealthy = /health is
+                docling_service_wedged ({{ $labels.choice }}) logged on
+                {{ $labels.host }}{{ $labels.pod }} in the last 10 min. unhealthy = /health is
                 503 and the controller should route docling-active away;
                 restart = the service exited itself to recover. Check
                 /capacity leaked_slots / overdue_s and the
