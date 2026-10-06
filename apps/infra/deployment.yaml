@@ -500,6 +500,17 @@ spec:
             # grafana:3000 keeps working.
             - name: GF_SERVER_PROTOCOL
               value: "http"
+            # Alert email (apps/infra/configmap.yaml grafana-alerting) via a
+            # Gmail app password. GF_SMTP_USER / GF_SMTP_PASSWORD /
+            # GF_SMTP_FROM_ADDRESS come from monitoring-secrets (envFrom above).
+            - name: GF_SMTP_ENABLED
+              value: "true"
+            - name: GF_SMTP_HOST
+              value: "smtp.gmail.com:587"
+            - name: GF_SMTP_STARTTLS_POLICY
+              value: "MandatoryStartTLS"
+            - name: GF_SMTP_FROM_NAME
+              value: "Grafana (infra.saliltrehan.com)"
           volumeMounts:
             - name: data
               mountPath: /var/lib/grafana
@@ -509,6 +520,8 @@ spec:
               mountPath: /etc/grafana/provisioning/dashboards
             - name: dashboard-json
               mountPath: /etc/grafana/provisioning/dashboards/json
+            - name: alerting
+              mountPath: /etc/grafana/provisioning/alerting
           readinessProbe:
             httpGet:
               path: /api/health
@@ -541,3 +554,6 @@ spec:
         - name: dashboard-json
           configMap:
             name: grafana-dashboard-json
+        - name: alerting
+          configMap:
+            name: grafana-alerting
