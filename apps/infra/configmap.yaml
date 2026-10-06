@@ -2021,3 +2021,108 @@ data:
          '{"name": "HR Admin", "dept": "HR", "grade": "HR Administrator", "is_admin": true}'::jsonb,
          NOW())
     ON CONFLICT ("identifier") DO NOTHING;
+---
+# ─── Grafana alerting (provisioned) ───────────────────────────────────────────
+# Mounted at /etc/grafana/provisioning/alerting. Email needs SMTP: the
+# GF_SMTP_USER / GF_SMTP_PASSWORD / GF_SMTP_FROM_ADDRESS keys in
+# monitoring-secrets (see secret.yaml.example); without them Grafana still
+# evaluates the rule but the send fails (visible in the alert's state history).
+#
+# The notification policy below replaces the root policy, so EVERY Grafana
+# alert routes to this email contact point. Add matchers/child routes here
+# before adding alerts meant for someone else.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-alerting
+  namespace: infra
+data:
+  alerting.yml: |
+    apiVersion: 1
+
+    contactPoints:
+      - orgId: 1
+        name: ops-email
+        receivers:
+          - uid: ops-email
+            type: email
+            settings:
+              addresses: ccdev2@inheaden.io
+              singleEmail: true
+            disableResolveMessage: false
+
+    policies:
+      - orgId: 1
+        receiver: ops-email
+        group_by: ["grafana_folder", "alertname"]
+        group_wait: 30s
+        group_interval: 5m
+        repeat_interval: 4h
+
+    groups:
+      - orgId: 1
+        name: docling-service
+        folder: Alerts
+        interval: 1m
+        rules:
+          # RFC-052 A-P5-6 (task 11.13): docling-service logs the decision
+          # record docling_service_wedged once per episode -- choice
+          # "unhealthy" when slots have leaked / a conversion is overdue for
+          # DOCLING_WEDGE_GRACE_S (/health answers 503), and choice "restart"
+          # when it exits itself after DOCLING_WEDGE_RESTART_S. Both copies
+          # land as service="docling-service": the Mac pushes to Loki directly
+          # (stream_labels: host="mac"), and promtail maps docling-1's pod
+          # label app=docling-service to `service` (it sets pod, not host).
+          - uid: docling-service-wedged
+            title: docling-service wedged
+            condition: C
+            data:
+              - refId: A
+                relativeTimeRange:
+                  from: 600
+                  to: 0
+                datasourceUid: loki
+                model:
+                  refId: A
+                  queryType: instant
+                  expr: >-
+                    sum by (host, pod, choice) (count_over_time({service="docling-service"}
+                    |= "docling_service_wedged" | json
+                    | event="docling_service_wedged" [10m]))
+              - refId: B
+                datasourceUid: __expr__
+                model:
+                  refId: B
+                  type: reduce
+                  expression: A
+                  reducer: last
+                  settings:
+                    mode: dropNN
+              - refId: C
+                datasourceUid: __expr__
+                model:
+                  refId: C
+                  type: threshold
+                  expression: B
+                  conditions:
+                    - evaluator:
+                        type: gt
+                        params: [0]
+            # No record in the last 10 min = no wedge, not a broken query.
+            noDataState: OK
+            execErrState: Error
+            for: 0s
+            labels:
+              severity: critical
+              service: docling-service
+            # Rule annotations are exempt from provisioning's env-var
+            # interpolation, so $labels stays as written (no $$ escape).
+            annotations:
+              summary: docling-service wedged on {{ $labels.host }}{{ $labels.pod }} ({{ $labels.choice }})
+              description: >-
+                docling_service_wedged ({{ $labels.choice }}) logged on
+                {{ $labels.host }}{{ $labels.pod }} in the last 10 min. unhealthy = /health is
+                503 and the controller should route docling-active away;
+                restart = the service exited itself to recover. Check
+                /capacity leaked_slots / overdue_s and the
+                docling-node-controller tick log.
