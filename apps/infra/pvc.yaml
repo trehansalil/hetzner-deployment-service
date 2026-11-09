@@ -8,31 +8,31 @@
 # Migrating existing data from the old app-namespace PVCs into these is a one-time
 # operation — see apps/infra/MIGRATION.md.
 ---
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: clickhouse-data
-  namespace: infra
-spec:
-  accessModes:
-    - ReadWriteOnce
-  storageClassName: local-path
-  resources:
-    requests:
-      storage: 10Gi
+# apiVersion: v1
+# kind: PersistentVolumeClaim
+# metadata:
+#   name: clickhouse-data
+#   namespace: infra
+# spec:
+#   accessModes:
+#     - ReadWriteOnce
+#   storageClassName: local-path
+#   resources:
+#     requests:
+#       storage: 10Gi
 ---
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: clickhouse-logs
-  namespace: infra
-spec:
-  accessModes:
-    - ReadWriteOnce
-  storageClassName: local-path
-  resources:
-    requests:
-      storage: 2Gi
+# apiVersion: v1
+# kind: PersistentVolumeClaim
+# metadata:
+#   name: clickhouse-logs
+#   namespace: infra
+# spec:
+#   accessModes:
+#     - ReadWriteOnce
+#   storageClassName: local-path
+#   resources:
+#     requests:
+#       storage: 2Gi
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

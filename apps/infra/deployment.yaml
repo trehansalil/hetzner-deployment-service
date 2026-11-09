@@ -1,83 +1,85 @@
+# ClickHouse block below is commented out: removed live in the 2026-10-08 outage and unused.
+# Uncomment it (and the clickhouse PVCs in pvc.yaml / Service in service.yaml) to restore.
 # ─── ClickHouse ───────────────────────────────────────────────────────────────
 # Scaled to 0: removed live in the 2026-10-08 disk-pressure outage (manifest kept so
 # the data PVC/service definitions stay tracked). Raise replicas to bring it back.
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: clickhouse
-  namespace: infra
-  labels:
-    app: clickhouse
-spec:
-  replicas: 0
-  strategy:
-    type: Recreate    # PVC-backed with file locks — cannot run two pods simultaneously
-  selector:
-    matchLabels:
-      app: clickhouse
-  template:
-    metadata:
-      labels:
-        app: clickhouse
-    spec:
-      containers:
-      - name: clickhouse
-        # Pinned (was :latest). On a host-path data migration this tag must be >= the
-        # version currently running live, or ClickHouse refuses to start on the copied
-        # data dir (no cross-version downgrade). See apps/infra/MIGRATION.md.
-        image: clickhouse/clickhouse-server:25.8
-        ports:
-        - containerPort: 8123
-        - containerPort: 9000
-        env:
-        - name: CLICKHOUSE_DB
-          valueFrom:
-            configMapKeyRef:
-              name: infra-config
-              key: CLICKHOUSE_DB
-        - name: CLICKHOUSE_USER
-          valueFrom:
-            configMapKeyRef:
-              name: infra-config
-              key: CLICKHOUSE_USER
-        - name: CLICKHOUSE_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: infra-secrets
-              key: CLICKHOUSE_PASSWORD
-        - name: CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT
-          value: "1"
-        volumeMounts:
-        - name: clickhouse-data
-          mountPath: /var/lib/clickhouse
-        - name: clickhouse-logs
-          mountPath: /var/log/clickhouse-server
-        livenessProbe:
-          httpGet:
-            path: /ping
-            port: 8123
-          initialDelaySeconds: 30
-          periodSeconds: 10
-        readinessProbe:
-          httpGet:
-            path: /ping
-            port: 8123
-          initialDelaySeconds: 15
-          periodSeconds: 5
-        resources:
-          requests:
-            memory: "512Mi"
-            cpu: "250m"
-          limits:
-            memory: "1536Mi"
-            cpu: "1000m"
-      volumes:
-      - name: clickhouse-data
-        persistentVolumeClaim:
-          claimName: clickhouse-data
-      - name: clickhouse-logs
-        persistentVolumeClaim:
-          claimName: clickhouse-logs
+# apiVersion: apps/v1
+# kind: Deployment
+# metadata:
+#   name: clickhouse
+#   namespace: infra
+#   labels:
+#     app: clickhouse
+# spec:
+#   replicas: 0
+#   strategy:
+#     type: Recreate    # PVC-backed with file locks — cannot run two pods simultaneously
+#   selector:
+#     matchLabels:
+#       app: clickhouse
+#   template:
+#     metadata:
+#       labels:
+#         app: clickhouse
+#     spec:
+#       containers:
+#       - name: clickhouse
+#         # Pinned (was :latest). On a host-path data migration this tag must be >= the
+#         # version currently running live, or ClickHouse refuses to start on the copied
+#         # data dir (no cross-version downgrade). See apps/infra/MIGRATION.md.
+#         image: clickhouse/clickhouse-server:25.8
+#         ports:
+#         - containerPort: 8123
+#         - containerPort: 9000
+#         env:
+#         - name: CLICKHOUSE_DB
+#           valueFrom:
+#             configMapKeyRef:
+#               name: infra-config
+#               key: CLICKHOUSE_DB
+#         - name: CLICKHOUSE_USER
+#           valueFrom:
+#             configMapKeyRef:
+#               name: infra-config
+#               key: CLICKHOUSE_USER
+#         - name: CLICKHOUSE_PASSWORD
+#           valueFrom:
+#             secretKeyRef:
+#               name: infra-secrets
+#               key: CLICKHOUSE_PASSWORD
+#         - name: CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT
+#           value: "1"
+#         volumeMounts:
+#         - name: clickhouse-data
+#           mountPath: /var/lib/clickhouse
+#         - name: clickhouse-logs
+#           mountPath: /var/log/clickhouse-server
+#         livenessProbe:
+#           httpGet:
+#             path: /ping
+#             port: 8123
+#           initialDelaySeconds: 30
+#           periodSeconds: 10
+#         readinessProbe:
+#           httpGet:
+#             path: /ping
+#             port: 8123
+#           initialDelaySeconds: 15
+#           periodSeconds: 5
+#         resources:
+#           requests:
+#             memory: "512Mi"
+#             cpu: "250m"
+#           limits:
+#             memory: "1536Mi"
+#             cpu: "1000m"
+#       volumes:
+#       - name: clickhouse-data
+#         persistentVolumeClaim:
+#           claimName: clickhouse-data
+#       - name: clickhouse-logs
+#         persistentVolumeClaim:
+#           claimName: clickhouse-logs
 ---
 # ─── MinIO ────────────────────────────────────────────────────────────────────
 apiVersion: apps/v1

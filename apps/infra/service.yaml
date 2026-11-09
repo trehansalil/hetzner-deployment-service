@@ -4,22 +4,22 @@
 # Exception: `postgres` is a headless Service (clusterIP: None) — it is the
 # governing Service for the postgres StatefulSet (see statefulset.yaml).
 ---
-apiVersion: v1
-kind: Service
-metadata:
-  name: clickhouse
-  namespace: infra
-spec:
-  selector:
-    app: clickhouse
-  ports:
-    - name: http
-      port: 8123
-      targetPort: 8123
-    - name: native
-      port: 9000
-      targetPort: 9000
-  type: ClusterIP
+# apiVersion: v1
+# kind: Service
+# metadata:
+#   name: clickhouse
+#   namespace: infra
+# spec:
+#   selector:
+#     app: clickhouse
+#   ports:
+#     - name: http
+#       port: 8123
+#       targetPort: 8123
+#     - name: native
+#       port: 9000
+#       targetPort: 9000
+#   type: ClusterIP
 ---
 apiVersion: v1
 kind: Service
