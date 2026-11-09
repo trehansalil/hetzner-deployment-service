@@ -1,4 +1,6 @@
 # ─── ClickHouse ───────────────────────────────────────────────────────────────
+# Scaled to 0: removed live in the 2026-10-08 disk-pressure outage (manifest kept so
+# the data PVC/service definitions stay tracked). Raise replicas to bring it back.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -7,7 +9,7 @@ metadata:
   labels:
     app: clickhouse
 spec:
-  replicas: 1
+  replicas: 0
   strategy:
     type: Recreate    # PVC-backed with file locks — cannot run two pods simultaneously
   selector:
@@ -99,8 +101,10 @@ spec:
     spec:
       containers:
       - name: minio
-        # Pinned (was :latest); verify >= the live version before a data migration.
-        image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+        # Upstream minio/minio images are no longer pullable (Docker Hub + quay return 401
+        # for all tags, 2026-10-08), so live runs the coollabsio/minio mirror build.
+        # Pinned; keep >= the live version (no cross-version downgrade of the data dir).
+        image: coollabsio/minio:RELEASE.2025-10-15T17-29-55Z
         args: ["server", "/data", "--console-address", ":9001"]
         ports:
         - containerPort: 9000
@@ -128,19 +132,27 @@ spec:
         volumeMounts:
         - name: minio-data
           mountPath: /data
+        startupProbe:
+          httpGet:
+            path: /minio/health/live
+            port: 9000
+          periodSeconds: 5
+          timeoutSeconds: 5
+          failureThreshold: 30
+        readinessProbe:
+          httpGet:
+            path: /minio/health/ready
+            port: 9000
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
         livenessProbe:
           httpGet:
             path: /minio/health/live
             port: 9000
-          initialDelaySeconds: 30
-          periodSeconds: 30
-        readinessProbe:
-          httpGet:
-            # readiness uses /ready (cluster/quorum view), not the /live liveness endpoint
-            path: /minio/health/ready
-            port: 9000
-          initialDelaySeconds: 15
-          periodSeconds: 10
+          periodSeconds: 20
+          timeoutSeconds: 5
+          failureThreshold: 5
         resources:
           requests:
             memory: "128Mi"
@@ -176,6 +188,18 @@ spec:
         image: redis:7-alpine
         ports:
         - containerPort: 6379
+        startupProbe:
+          tcpSocket:
+            port: 6379
+          periodSeconds: 5
+          timeoutSeconds: 5
+          failureThreshold: 30
+        livenessProbe:
+          tcpSocket:
+            port: 6379
+          periodSeconds: 20
+          timeoutSeconds: 5
+          failureThreshold: 5
         resources:
           requests:
             memory: "64Mi"
@@ -193,7 +217,9 @@ metadata:
   labels:
     app: n8n
 spec:
-  replicas: 1
+  # Scaled to 0 live since the 2026-10-08 disk-pressure outage (node disk was at 93%).
+  # Raise to 1 only after confirming the node has disk headroom; n8n-data PVC is kept.
+  replicas: 0
   strategy:
     type: Recreate    # PVC-backed (SQLite) with file locks — cannot run two pods simultaneously
   selector:
@@ -326,6 +352,7 @@ spec:
       labels:
         app: prometheus
     spec:
+      serviceAccountName: prometheus
       securityContext:
         runAsUser: 65534   # nobody
         runAsNonRoot: true
@@ -346,18 +373,27 @@ spec:
               mountPath: /etc/prometheus
             - name: data
               mountPath: /prometheus
+          startupProbe:
+            httpGet:
+              path: /-/healthy
+              port: 9090
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 30
           readinessProbe:
             httpGet:
               path: /-/ready
               port: 9090
-            initialDelaySeconds: 10
             periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
           livenessProbe:
             httpGet:
               path: /-/healthy
               port: 9090
-            initialDelaySeconds: 30
-            periodSeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 5
           resources:
             requests:
               cpu: "100m"
@@ -406,18 +442,27 @@ spec:
               mountPath: /etc/loki
             - name: data
               mountPath: /loki
+          startupProbe:
+            httpGet:
+              path: /ready
+              port: 3100
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 30
           readinessProbe:
             httpGet:
               path: /ready
               port: 3100
-            initialDelaySeconds: 15
             periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
           livenessProbe:
             httpGet:
               path: /ready
               port: 3100
-            initialDelaySeconds: 45
-            periodSeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 5
           resources:
             requests:
               cpu: "100m"
@@ -522,18 +567,27 @@ spec:
               mountPath: /etc/grafana/provisioning/dashboards/json
             - name: alerting
               mountPath: /etc/grafana/provisioning/alerting
+          startupProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 30
           readinessProbe:
             httpGet:
               path: /api/health
               port: 3000
-            initialDelaySeconds: 20
             periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
           livenessProbe:
             httpGet:
               path: /api/health
               port: 3000
-            initialDelaySeconds: 60
-            periodSeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 5
           resources:
             requests:
               cpu: "50m"

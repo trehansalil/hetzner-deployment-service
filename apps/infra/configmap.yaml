@@ -49,6 +49,37 @@ data:
           - targets: ["pageindex-mcp.pageindex-mcp.svc:8201"]
             labels:
               service: "pageindex-mcp"
+
+      # kubelet cAdvisor via apiserver proxy (needs nodes/proxy RBAC: prometheus-cadvisor)
+      - job_name: "kubelet-cadvisor"
+        scrape_interval: 30s
+        scheme: https
+        metrics_path: /metrics/cadvisor
+        authorization:
+          credentials_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        kubernetes_sd_configs:
+          - role: node
+        relabel_configs:
+          - target_label: __address__
+            replacement: kubernetes.default.svc:443
+          - source_labels: [__meta_kubernetes_node_name]
+            regex: (.+)
+            target_label: __metrics_path__
+            replacement: /api/v1/nodes/$1/proxy/metrics/cadvisor
+          - source_labels: [__meta_kubernetes_node_name]
+            target_label: node
+        metric_relabel_configs:
+          - source_labels: [__name__]
+            regex: container_(memory_working_set_bytes|memory_rss|cpu_usage_seconds_total|cpu_cfs_.*|oom_events_total|spec_memory_limit_bytes)
+            action: keep
+          - source_labels: [namespace]
+            regex: (infra|kube-system|keda)
+            action: keep
+          - source_labels: [container]
+            regex: ""
+            action: drop   # drop pod-level cgroup rows; keep per-container only
 ---
 apiVersion: v1
 kind: ConfigMap
