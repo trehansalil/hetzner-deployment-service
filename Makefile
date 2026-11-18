@@ -66,6 +66,9 @@ deploy-infra:
 	# through the migration validation window — they are pruned at decommission, not here.
 	# See apps/infra/MIGRATION.md Phase 5.
 	$(KUBECTL) apply -f apps/infra/cronjob-pod-cleanup.yaml -n $(INFRA_NS)
+	# Paper MCP (paper-mcp.saliltrehan.com). Secrets paper-mcp-oauth / paper-exports-s3 are
+	# created out-of-band; image localhost/paper-desktop is node-local. See the file header.
+	$(KUBECTL) apply -f apps/infra/paper-mcp.yaml -n $(INFRA_NS)
 	$(KUBECTL) rollout status deployment/loki-tailscale-gateway -n $(INFRA_NS) --timeout=120s
 
 .PHONY: status-infra

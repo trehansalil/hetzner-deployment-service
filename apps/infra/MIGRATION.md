@@ -234,3 +234,12 @@ pod to 0 and the old back to 1.
 - **Ownership on host copy** — ClickHouse dir must be `chown 999:999`, n8n `1000:1000`,
   or the pod won't start.
 - **Prometheus/Loki history is discarded** (reset class) — export first if you need it.
+
+## Live-only workloads in `infra` (WARNING for `make destroy-infra`)
+
+`destroy-infra` deletes the whole namespace. Besides what this repo declares, the
+namespace holds workloads that are NOT in git: claude-mem, doop, postgres-stable and
+synchub-service. Paper MCP is declared in `paper-mcp.yaml` but depends on out-of-band
+Secrets (`paper-mcp-oauth`, `paper-exports-s3`), the node-local image
+`localhost/paper-desktop:0.5.16` and PVCs holding its login session, so a namespace
+rebuild needs those restored first.

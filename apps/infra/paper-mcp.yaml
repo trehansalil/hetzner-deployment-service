@@ -1,0 +1,574 @@
+# Paper Desktop MCP (paper-mcp.saliltrehan.com) -- Google-login MCP proxy + Paper sidecar.
+# Request chain: Traefik -> Service paper-mcp-auth:8080 -> proxy (sigbit/mcp-auth-proxy)
+#   -> exportshim :8082 -> hostfix nginx :8081 -> paper :29979 (all one pod).
+#
+# Adopted from the hand-applied live stack; this file is now the source of truth.
+#
+# NOT in git (create out-of-band, see secret.yaml.example):
+#   Secret paper-mcp-oauth  keys: client-id, client-secret, allowed-users
+#   Secret paper-exports-s3 keys: access-key, secret-key   (MinIO user paper-exports-rw)
+# cert-manager issues Secret paper-mcp-tls from the paper-mcp Ingress annotation.
+#
+# LOCAL IMAGE: localhost/paper-desktop:0.5.16 is imported into the node's containerd
+# (imagePullPolicy: Never) -- CI/kubectl cannot pull it. If the node is rebuilt, re-import:
+#   k3s ctr -n k8s.io images import /mnt/HC_Volume_106759881/paper-image-build/paper-desktop.tar
+# Single-node only (pod must land on the node holding the image).
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: paper-mcp-auth-data
+  namespace: infra
+  labels:
+    app.kubernetes.io/part-of: paper-mcp
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Mi
+  storageClassName: local-path
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: paper-desktop-data
+  namespace: infra
+  labels:
+    app.kubernetes.io/part-of: paper-mcp
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: local-path
+---
+apiVersion: v1
+data:
+  default.conf: |
+    # Paper rejects any Host other than localhost:29979 and any Origin header
+    # (DNS-rebinding guard), so rewrite both before forwarding. Paper now runs
+    # as a sidecar in this pod, so upstream is localhost.
+    server {
+      listen 127.0.0.1:8081;
+      location / {
+        proxy_pass http://127.0.0.1:29979;
+        proxy_http_version 1.1;
+        proxy_set_header Host 127.0.0.1:29979;
+        proxy_set_header Origin "";
+        proxy_set_header Connection "";
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+      }
+    }
+kind: ConfigMap
+metadata:
+  name: paper-mcp-hostfix
+  namespace: infra
+  labels:
+    app.kubernetes.io/part-of: paper-mcp
+---
+apiVersion: v1
+data:
+  shim.py: |
+    """Paper MCP export shim.
+
+    Sits between mcp-auth-proxy and the nginx hostfix. Passes everything through
+    untouched, except successful `export` tool calls: for each exported file it
+    uploads the PNG to MinIO and appends a 24h presigned URL to the tool result.
+    Any failure falls back to the unmodified Paper response.
+    """
+    import datetime
+    import hashlib
+    import hmac
+    import http.client
+    import json
+    import os
+    import re
+    import sys
+    import urllib.parse
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    UPSTREAM = ("127.0.0.1", 8081)
+    LISTEN = ("127.0.0.1", 8082)
+    S3_HOST, S3_PORT = os.environ.get("S3_HOST", "minio.infra.svc.cluster.local"), int(os.environ.get("S3_PORT", "9000"))
+    PUBLIC_HOST = os.environ["PUBLIC_HOST"]          # e.g. paper-mcp.saliltrehan.com
+    BUCKET = os.environ.get("BUCKET", "paper-exports")
+    AK, SK = os.environ["S3_ACCESS_KEY"], os.environ["S3_SECRET_KEY"]
+    REGION = "us-east-1"
+    TTL = 24 * 3600
+    ALLOWED_ROOT = os.environ.get("ALLOWED_ROOT", "/home/paperuser/")
+    HOP = {"connection", "keep-alive", "transfer-encoding", "te", "trailer", "upgrade", "proxy-authenticate", "proxy-authorization"}
+
+
+    def log(*a):
+        print(*a, file=sys.stderr, flush=True)
+
+
+    def _sign(key, msg):
+        return hmac.new(key, msg.encode(), hashlib.sha256).digest()
+
+
+    def _skey(date):
+        k = _sign(("AWS4" + SK).encode(), date)
+        for p in (REGION, "s3", "aws4_request"):
+            k = _sign(k, p)
+        return k
+
+
+    def _q(s):
+        return urllib.parse.quote(s, safe="-_.~")
+
+
+    def s3_put(key, body, ctype):
+        now = datetime.datetime.now(datetime.timezone.utc)
+        amz, date = now.strftime("%Y%m%dT%H%M%SZ"), now.strftime("%Y%m%d")
+        path = "/%s/%s" % (BUCKET, urllib.parse.quote(key))
+        host = "%s:%d" % (S3_HOST, S3_PORT)
+        phash = hashlib.sha256(body).hexdigest()
+        hdrs = {"content-type": ctype, "host": host, "x-amz-content-sha256": phash, "x-amz-date": amz}
+        names = ";".join(sorted(hdrs))
+        canon = "PUT\n%s\n\n%s\n%s\n%s" % (path, "".join("%s:%s\n" % (k, hdrs[k]) for k in sorted(hdrs)), names, phash)
+        scope = "%s/%s/s3/aws4_request" % (date, REGION)
+        sts = "AWS4-HMAC-SHA256\n%s\n%s\n%s" % (amz, scope, hashlib.sha256(canon.encode()).hexdigest())
+        sig = hmac.new(_skey(date), sts.encode(), hashlib.sha256).hexdigest()
+        auth = "AWS4-HMAC-SHA256 Credential=%s/%s, SignedHeaders=%s, Signature=%s" % (AK, scope, names, sig)
+        c = http.client.HTTPConnection(S3_HOST, S3_PORT, timeout=60)
+        c.request("PUT", path, body=body, headers={"Content-Type": ctype, "x-amz-content-sha256": phash, "x-amz-date": amz, "Authorization": auth})
+        r = c.getresponse()
+        data = r.read()
+        c.close()
+        if r.status not in (200, 201):
+            raise RuntimeError("s3 put %s: %s" % (r.status, data[:200]))
+
+
+    def presign(key):
+        now = datetime.datetime.now(datetime.timezone.utc)
+        amz, date = now.strftime("%Y%m%dT%H%M%SZ"), now.strftime("%Y%m%d")
+        path = "/%s/%s" % (BUCKET, urllib.parse.quote(key))
+        scope = "%s/%s/s3/aws4_request" % (date, REGION)
+        q = {"X-Amz-Algorithm": "AWS4-HMAC-SHA256", "X-Amz-Credential": "%s/%s" % (AK, scope),
+             "X-Amz-Date": amz, "X-Amz-Expires": str(TTL), "X-Amz-SignedHeaders": "host"}
+        cq = "&".join("%s=%s" % (_q(k), _q(q[k])) for k in sorted(q))
+        canon = "GET\n%s\n%s\nhost:%s\n\nhost\nUNSIGNED-PAYLOAD" % (path, cq, PUBLIC_HOST)
+        sts = "AWS4-HMAC-SHA256\n%s\n%s\n%s" % (amz, scope, hashlib.sha256(canon.encode()).hexdigest())
+        sig = hmac.new(_skey(date), sts.encode(), hashlib.sha256).hexdigest()
+        exp = (now + datetime.timedelta(seconds=TTL)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return "https://%s%s?%s&X-Amz-Signature=%s" % (PUBLIC_HOST, path, cq, sig), exp
+
+
+    def publish(file_path, node_id):
+        real = os.path.realpath(file_path)
+        if not real.startswith(ALLOWED_ROOT) or not real.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".avif", ".svg", ".pdf", ".mp4", ".webm")):
+            raise ValueError("path not allowed: %s" % file_path)
+        with open(real, "rb") as f:
+            body = f.read()
+        ext = os.path.splitext(real)[1].lower()
+        ctype = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".avif": "image/avif",
+                 ".svg": "image/svg+xml", ".pdf": "application/pdf", ".mp4": "video/mp4", ".webm": "video/webm"}[ext]
+        name = re.sub(r"[^A-Za-z0-9._@-]+", "_", os.path.basename(real))
+        key = "%s/%s-%s" % (datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d"), hashlib.sha256(body).hexdigest()[:10], name)
+        s3_put(key, body, ctype)
+        return presign(key)
+
+
+    def rewrite_obj(obj):
+        """Add downloadUrl to exports inside a JSON-RPC response object. Returns True if changed."""
+        res = obj.get("result") if isinstance(obj, dict) else None
+        if not isinstance(res, dict) or res.get("isError"):
+            return False
+        changed = False
+        for block in res.get("content") or []:
+            if block.get("type") != "text":
+                continue
+            try:
+                inner = json.loads(block["text"])
+            except Exception:
+                continue
+            if not isinstance(inner, dict) or not isinstance(inner.get("exports"), list):
+                continue
+            cache = {}
+            for ex in inner["exports"]:
+                if not isinstance(ex, dict) or not ex.get("filePath"):
+                    continue
+                try:
+                    if ex["filePath"] not in cache:  # combined PDF repeats one path per node
+                        cache[ex["filePath"]] = publish(ex["filePath"], ex.get("nodeId"))
+                    url, exp = cache[ex["filePath"]]
+                    ex["downloadUrl"], ex["downloadUrlExpiresAt"] = url, exp
+                    changed = True
+                except Exception as e:  # never break a normal export
+                    log("publish failed:", repr(e))
+                    ex["downloadUrlError"] = str(e)[:120]
+                    changed = True
+            block["text"] = json.dumps(inner, indent=2)
+        return changed
+
+
+    def rewrite_body(raw, ctype):
+        if "text/event-stream" in ctype:
+            out, changed = [], False
+            for line in raw.decode("utf-8", "replace").split("\n"):
+                if line.startswith("data:"):
+                    try:
+                        o = json.loads(line[5:].strip())
+                        if rewrite_obj(o):
+                            line, changed = "data: " + json.dumps(o), True
+                    except Exception:
+                        pass
+                out.append(line)
+            return "\n".join(out).encode() if changed else raw
+        try:
+            o = json.loads(raw)
+        except Exception:
+            return raw
+        if isinstance(o, list):
+            return json.dumps(o).encode() if any([rewrite_obj(x) for x in o]) else raw
+        return json.dumps(o).encode() if rewrite_obj(o) else raw
+
+
+    def is_export_call(body):
+        try:
+            o = json.loads(body)
+        except Exception:
+            return False
+        objs = o if isinstance(o, list) else [o]
+        return any(isinstance(x, dict) and x.get("method") == "tools/call" and (x.get("params") or {}).get("name") in ("export", "export_combined_pdf") for x in objs)
+
+
+    class H(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *a):
+            pass
+
+        def handle_any(self):
+            n = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(n) if n else b""
+            hdrs = {k: v for k, v in self.headers.items() if k.lower() not in HOP and k.lower() != "content-length"}
+            hdrs["Content-Length"] = str(len(body))
+            c = http.client.HTTPConnection(*UPSTREAM, timeout=3600)
+            c.request(self.command, self.path, body=body, headers=hdrs)
+            r = c.getresponse()
+            rh = [(k, v) for k, v in r.getheaders() if k.lower() not in HOP and k.lower() != "content-length"]
+            ctype = r.getheader("Content-Type") or ""
+            if self.command == "POST" and is_export_call(body):
+                data = r.read()
+                try:
+                    data = rewrite_body(data, ctype)
+                except Exception as e:
+                    log("rewrite failed:", repr(e))
+                self.send_response(r.status)
+                for k, v in rh:
+                    self.send_header(k, v)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+            else:  # stream through unchanged
+                self.send_response(r.status)
+                for k, v in rh:
+                    self.send_header(k, v)
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.close_connection = True
+                while True:
+                    chunk = r.read1(8192) if hasattr(r, "read1") else r.read(8192)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
+            c.close()
+
+        do_GET = do_POST = do_DELETE = do_PUT = do_OPTIONS = do_HEAD = handle_any
+
+
+    if __name__ == "__main__":
+        log("export shim listening", LISTEN)
+        ThreadingHTTPServer(LISTEN, H).serve_forever()
+kind: ConfigMap
+metadata:
+  name: paper-export-shim
+  namespace: infra
+  labels:
+    app.kubernetes.io/part-of: paper-mcp
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: paper-mcp-auth
+    app.kubernetes.io/part-of: paper-mcp
+  name: paper-mcp-auth
+  namespace: infra
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: paper-mcp-auth
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: paper-mcp-auth
+    spec:
+      containers:
+      - env:
+        - name: PAPER_ARGS
+          value: --disable-gpu --use-gl=angle --use-angle=swiftshader --in-process-gpu --disable-gpu-compositing
+        image: localhost/paper-desktop:0.5.16
+        imagePullPolicy: Never
+        livenessProbe:
+          exec:
+            command:
+            - bash
+            - -c
+            - exec 3<>/dev/tcp/127.0.0.1/29979
+          failureThreshold: 6
+          initialDelaySeconds: 60
+          periodSeconds: 20
+          successThreshold: 1
+          timeoutSeconds: 3
+        name: paper
+        ports:
+        - containerPort: 29979
+          protocol: TCP
+        readinessProbe:
+          exec:
+            command:
+            - bash
+            - -c
+            - exec 3<>/dev/tcp/127.0.0.1/29979
+          failureThreshold: 3
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 3
+        resources:
+          limits:
+            cpu: '1'
+            memory: 1Gi
+          requests:
+            cpu: 100m
+            memory: 512Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsNonRoot: true
+          runAsUser: 1000
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /home/paperuser
+          name: paper-home
+        - mountPath: /dev/shm
+          name: shm
+        - mountPath: /tmp
+          name: tmp
+      - args:
+        - --
+        - http://127.0.0.1:8082
+        env:
+        - name: EXTERNAL_URL
+          value: https://paper-mcp.saliltrehan.com
+        - name: NO_AUTO_TLS
+          value: 'true'
+        - name: LISTEN
+          value: :8080
+        - name: DATA_PATH
+          value: /data
+        - name: GOOGLE_ALLOWED_USERS
+          valueFrom:
+            secretKeyRef:
+              name: paper-mcp-oauth
+              key: allowed-users
+        - name: GOOGLE_CLIENT_ID
+          valueFrom:
+            secretKeyRef:
+              key: client-id
+              name: paper-mcp-oauth
+        - name: GOOGLE_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              key: client-secret
+              name: paper-mcp-oauth
+        image: ghcr.io/sigbit/mcp-auth-proxy:v2.10.2
+        imagePullPolicy: IfNotPresent
+        name: proxy
+        ports:
+        - containerPort: 8080
+          protocol: TCP
+        resources:
+          limits:
+            cpu: 200m
+            memory: 128Mi
+          requests:
+            cpu: 20m
+            memory: 48Mi
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /data
+          name: data
+      - command:
+        - python
+        - -u
+        - /app/shim.py
+        env:
+        - name: PUBLIC_HOST
+          value: paper-mcp.saliltrehan.com
+        - name: S3_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              key: access-key
+              name: paper-exports-s3
+        - name: S3_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              key: secret-key
+              name: paper-exports-s3
+        image: docker.io/library/python:3.12-alpine
+        imagePullPolicy: IfNotPresent
+        name: exportshim
+        resources:
+          limits:
+            cpu: 200m
+            memory: 96Mi
+          requests:
+            cpu: 10m
+            memory: 24Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsNonRoot: true
+          runAsUser: 1000
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /app
+          name: shim-code
+          readOnly: true
+        - mountPath: /home/paperuser
+          name: paper-home
+          readOnly: true
+      - image: nginx:1.27-alpine
+        imagePullPolicy: IfNotPresent
+        name: hostfix
+        ports:
+        - containerPort: 8081
+          protocol: TCP
+        resources:
+          limits:
+            cpu: 100m
+            memory: 32Mi
+          requests:
+            cpu: 5m
+            memory: 8Mi
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /etc/nginx/conf.d
+          name: hostfix-conf
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext:
+        fsGroup: 1000
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - configMap:
+          defaultMode: 420
+          name: paper-export-shim
+        name: shim-code
+      - name: paper-home
+        persistentVolumeClaim:
+          claimName: paper-desktop-data
+      - emptyDir:
+          medium: Memory
+          sizeLimit: 256Mi
+        name: shm
+      - emptyDir: {}
+        name: tmp
+      - configMap:
+          defaultMode: 420
+          name: paper-mcp-hostfix
+        name: hostfix-conf
+      - name: data
+        persistentVolumeClaim:
+          claimName: paper-mcp-auth-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: paper-mcp-auth
+  namespace: infra
+  labels:
+    app.kubernetes.io/part-of: paper-mcp
+spec:
+  internalTrafficPolicy: Cluster
+  ipFamilies:
+  - IPv4
+  ipFamilyPolicy: SingleStack
+  ports:
+  - port: 8080
+    protocol: TCP
+    targetPort: 8080
+  selector:
+    app: paper-mcp-auth
+  sessionAffinity: None
+  type: ClusterIP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  name: paper-mcp
+  namespace: infra
+  labels:
+    app.kubernetes.io/part-of: paper-mcp
+spec:
+  ingressClassName: traefik
+  rules:
+  - host: paper-mcp.saliltrehan.com
+    http:
+      paths:
+      - backend:
+          service:
+            name: paper-mcp-auth
+            port:
+              number: 8080
+        path: /
+        pathType: Prefix
+  tls:
+  - hosts:
+    - paper-mcp.saliltrehan.com
+    secretName: paper-mcp-tls
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: paper-exports
+  namespace: infra
+  labels:
+    app.kubernetes.io/part-of: paper-mcp
+spec:
+  ingressClassName: traefik
+  rules:
+  - host: paper-mcp.saliltrehan.com
+    http:
+      paths:
+      - backend:
+          service:
+            name: minio
+            port:
+              number: 9000
+        path: /paper-exports
+        pathType: Prefix
+  tls:
+  - hosts:
+    - paper-mcp.saliltrehan.com
+    secretName: paper-mcp-tls
