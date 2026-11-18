@@ -7,7 +7,7 @@ spec:
   scaleTargetRef:
     name: claude-mem-gen-worker
   minReplicaCount: 1
-  maxReplicaCount: 5
+  maxReplicaCount: 1
   pollingInterval: 15
   cooldownPeriod: 300
   advanced:

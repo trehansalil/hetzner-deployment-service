@@ -10,7 +10,7 @@ Apply with `make deploy-infra-extras` (CI's infra job does not apply these).
 | `synchub-service.yaml` | Service + Endpoints -> host `synchub.service` :3001 | Runs on the node under systemd, not in-cluster. |
 | `service.yaml` (`postgres-stable`) | ClusterIP VIP for postgres | Used by host-run SyncHub. |
 
-Out-of-band secrets (never in git): claude-mem-creds, claude-mem-azure-keys, claude-mem-gen-worker-keys,
+Out-of-band secrets (never in git): claude-mem-creds, claude-mem-azure-keys, claude-mem-groq-key (Groq free-tier key used by gen-worker), claude-mem-gen-worker-keys,
 claude-mem-server-beta, claude-mem-sync-token, claude-mem-mtls-ca, doop-app, doop-db, doop-s3,
 paper-mcp-oauth, paper-exports-s3.
 

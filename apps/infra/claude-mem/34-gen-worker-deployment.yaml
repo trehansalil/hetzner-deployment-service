@@ -48,17 +48,17 @@ spec:
         - name: CLAUDE_MEM_SERVER_PROVIDER
           value: openrouter
         - name: CLAUDE_MEM_SERVER_MODEL
-          value: gpt-4.1
+          value: openai/gpt-oss-120b
         - name: OPENROUTER_API_KEY
           valueFrom:
             secretKeyRef:
-              key: AZURE_OPENAI_KEY
-              name: claude-mem-azure-keys
+              key: GROQ_API_KEY
+              name: claude-mem-groq-key
         - name: CLAUDE_MEM_OPENROUTER_API_KEY
           valueFrom:
             secretKeyRef:
-              key: AZURE_OPENAI_KEY
-              name: claude-mem-azure-keys
+              key: GROQ_API_KEY
+              name: claude-mem-groq-key
         - name: CLAUDE_MEM_MODE
           value: code
         image: ghcr.io/trehansalil/claude-mem:13.12.4-fix1
@@ -91,12 +91,12 @@ spec:
           set -e
           F=/patched/scripts/server-service.cjs
           # Patch 1 (loadMode injection) dropped: 13.12.4-fix1 calls loadMode itself.
-          # Patch 2: Redirect OpenRouter URL to Azure OpenAI
-          sed -i 's#https://openrouter.ai/api/v1/chat/completions#https://venki-test-azureopenai.openai.azure.com/openai/deployments/gpt-4.1/chat/completions?api-version=2025-01-01-preview#g' $F
-          grep -q 'venki-test-azureopenai.openai.azure.com' $F || { echo 'Patch 2 FAILED: OpenRouter URL anchor not found'; exit 1; }
-          echo 'Patch 2 applied: Azure URL'
+          # Patch 2: Redirect OpenRouter URL to Groq (OpenAI-compatible, free tier)
+          sed -i 's#https://openrouter.ai/api/v1/chat/completions#https://api.groq.com/openai/v1/chat/completions#g' $F
+          grep -q 'api.groq.com/openai/v1/chat/completions' $F || { echo 'Patch 2 FAILED: OpenRouter URL anchor not found'; exit 1; }
+          echo 'Patch 2 applied: Groq URL'
           # Patch 3: Fallback model when primary returns empty content (logger/arg names captured, not hardcoded)
-          export FALLBACK_MODEL="Mistral-Medium-3.5-128B"
+          export FALLBACK_MODEL="openai/gpt-oss-20b"
           cat > /tmp/patch3.js <<'EOF'
           const fs = require('fs');
           const F = '/patched/scripts/server-service.cjs';
@@ -132,29 +132,15 @@ spec:
             process.exit(1);
           }
           "
-          # Patch 5: Change auth from Bearer to api-key header for Azure
-          node -e "
-          const fs = require('fs');
-          let code = fs.readFileSync('/patched/scripts/server-service.cjs', 'utf8');
-          const target = 'Authorization:\x60Bearer \x24{this.apiKey}\x60';
-          const replacement = '\"api-key\":this.apiKey';
-          if (code.includes(target)) {
-            code = code.replace(target, replacement);
-            fs.writeFileSync('/patched/scripts/server-service.cjs', code);
-            console.log('Patch 5 applied: Azure api-key auth header');
-          } else {
-            console.error('Patch 5 FAILED: target string not found');
-            process.exit(1);
-          }
-          "
-          # Patch 6: Change max_tokens to max_completion_tokens for Azure
+          # Patch 5 dropped: Groq uses the default Bearer auth header.
+          # Patch 6: Change max_tokens to max_completion_tokens (gpt-oss reasoning models)
           node -e "
           const fs = require('fs');
           let code = fs.readFileSync('/patched/scripts/server-service.cjs', 'utf8');
           if (code.includes('max_tokens:')) {
             code = code.replace(/max_tokens:/g, 'max_completion_tokens:');
             fs.writeFileSync('/patched/scripts/server-service.cjs', code);
-            console.log('Patch 6 applied: max_completion_tokens for Azure');
+            console.log('Patch 6 applied: max_completion_tokens');
           } else {
             console.error('Patch 6 FAILED: max_tokens not found');
             process.exit(1);
@@ -165,7 +151,7 @@ spec:
           grep -q 'Patch 7 applied' /tmp/p7.out || { echo 'Patch 7 FAILED: anchor not found'; exit 1; }
           # Copy modes directory
           cp -r /opt/claude-mem/modes /patched/modes
-          echo "patched server-service.cjs for Azure OpenAI + concept constraint + prompt quality"
+          echo "patched server-service.cjs for Groq + concept constraint + prompt quality"
         command:
         - sh
         - -c
@@ -175,7 +161,7 @@ spec:
         - name: CLAUDE_MEM_SERVER_PROVIDER
           value: openrouter
         - name: CLAUDE_MEM_SERVER_MODEL
-          value: gpt-4.1
+          value: openai/gpt-oss-120b
         image: ghcr.io/trehansalil/claude-mem:13.12.4-fix1
         imagePullPolicy: IfNotPresent
         name: patch-script
