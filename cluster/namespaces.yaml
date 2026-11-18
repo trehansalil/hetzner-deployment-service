@@ -43,3 +43,10 @@ metadata:
   name: pageindex-mcp
   labels:
     app.kubernetes.io/managed-by: kubectl
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: career
+  labels:
+    app.kubernetes.io/managed-by: kubectl

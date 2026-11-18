@@ -1,0 +1,36 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: claude-mem-worker-patch
+  namespace: infra
+data:
+  apply-patch.js: |
+    // Item-2 fix: SearchOrchestrator.executeWithFallback() returns a hard-coded
+    // empty result set when a query is present and Chroma is not configured,
+    // instead of falling back to the SQLite/FTS5 strategy. Only caller affected
+    // is CorpusBuilder.build(), which is why build_corpus(query=...) yields 0.
+    const fs = require('fs');
+
+    const src = process.argv[2];
+    const dst = process.argv[3];
+
+    const TARGET =
+      'return h.debug("SEARCH","Orchestrator: Chroma not configured",{}),' +
+      '{results:{observations:[],sessions:[],prompts:[]},usedChroma:!1,strategy:"sqlite"}';
+
+    const REPLACEMENT =
+      'return h.debug("SEARCH","Orchestrator: Chroma not configured, falling back to SQLite",{}),' +
+      'await this.sqliteStrategy.search(e)';
+
+    let code = fs.readFileSync(src, 'utf8');
+    const hits = code.split(TARGET).length - 1;
+    console.log('target occurrences:', hits);
+
+    if (hits !== 1) {
+      console.error('ABORT: expected exactly 1 occurrence, refusing to patch');
+      process.exit(1);
+    }
+
+    code = code.replace(TARGET, REPLACEMENT);
+    fs.writeFileSync(dst, code);
+    console.log('wrote', dst, fs.statSync(dst).size, 'bytes');

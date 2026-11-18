@@ -1,0 +1,228 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: claude-mem-sync-pull-script
+  namespace: infra
+data:
+  sync-pull-sidecar.js: |
+    #!/usr/bin/env node
+    // Sidecar that periodically pulls sync_ops from the synchub and applies
+    // summary ops to the dashboard's local SQLite.
+    // Runs in node:22-slim alongside the dashboard container.
+
+    const { DatabaseSync } = require('node:sqlite');
+    const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || '300000', 10); // 5 min default
+    const HUB_URL = process.env.HUB_URL || 'http://synchub-service:3001';
+    const SYNC_TOKEN = process.env.SYNC_TOKEN;
+    const USER_ID = process.env.USER_ID || 'saliltrehan';
+    const DEVICE_ID = process.env.DEVICE_ID || 'dashboard-viewer';
+    const DB_PATH = process.env.DB_PATH || '/data/claude-mem.db';
+    const PAGE_LIMIT = 500;
+
+    if (!SYNC_TOKEN) { console.error('SYNC_TOKEN required'); process.exit(1); }
+
+    function openDb() {
+      const db = new DatabaseSync(DB_PATH);
+      db.exec(`PRAGMA journal_mode=WAL`);
+      db.exec(`PRAGMA busy_timeout=10000`);
+      db.exec(`PRAGMA foreign_keys=OFF`);
+      db.exec(`CREATE TABLE IF NOT EXISTS sync_pull_state (k TEXT PRIMARY KEY, v TEXT)`);
+      // Add missing columns to existing session_summaries table
+      const cols = db.prepare("PRAGMA table_info(session_summaries)").all().map(c => c.name);
+      if (!cols.includes('origin_device_id')) {
+        db.exec("ALTER TABLE session_summaries ADD COLUMN origin_device_id TEXT");
+      }
+      if (!cols.includes('origin_local_id')) {
+        db.exec("ALTER TABLE session_summaries ADD COLUMN origin_local_id TEXT");
+      }
+      if (!cols.includes('sync_rev')) {
+        db.exec("ALTER TABLE session_summaries ADD COLUMN sync_rev TEXT");
+      }
+      return db;
+    }
+
+    function getCursor(db) {
+      const row = db.prepare("SELECT v FROM sync_pull_state WHERE k = 'cursor'").get();
+      return row ? row.v : '0';
+    }
+
+    function setCursor(db, cursor) {
+      db.prepare("INSERT OR REPLACE INTO sync_pull_state (k, v) VALUES ('cursor', ?)").run(String(cursor));
+    }
+
+    // node:sqlite only binds null/number/bigint/string/buffer. Newer clients send
+    // files_read/files_edited as JSON arrays, and any missing field is undefined;
+    // either one throws "cannot be bound" and rolls back the whole page.
+    function toSqlValue(v) {
+      if (v === undefined || v === null) return null;
+      if (typeof v === 'object' && !(v instanceof Uint8Array)) return JSON.stringify(v);
+      if (typeof v === 'boolean') return v ? 1 : 0;
+      return v;
+    }
+
+    function ensureSessionExists(db, msid, project, createdAt, createdAtEpoch) {
+      const existing = db.prepare(
+        "SELECT memory_session_id FROM sdk_sessions WHERE memory_session_id = ?"
+      ).get(msid);
+      if (!existing) {
+        db.prepare(
+          "INSERT OR IGNORE INTO sdk_sessions (content_session_id, memory_session_id, project, platform_source, started_at, started_at_epoch, status) VALUES (?, ?, ?, 'cloud-sync', ?, ?, 'completed')"
+        ).run(...[msid, msid, project, createdAt, createdAtEpoch].map(toSqlValue));
+      }
+    }
+
+    function applySummaryOp(db, op) {
+      let body;
+      try {
+        body = JSON.parse(op.body);
+      } catch {
+        return false;
+      }
+
+      if (body.kind !== 'summary') return false;
+      if (body.deleted) return false;
+
+      const payload = body.payload;
+      if (!payload || !payload.memory_session_id) return false;
+
+      const msid = payload.memory_session_id;
+      const originDeviceId = body.origin_device_id;
+      const originLocalId = body.origin_local_id;
+
+      const existing = db.prepare(
+        "SELECT id FROM session_summaries WHERE memory_session_id = ? AND origin_device_id = ?"
+      ).get(msid, originDeviceId);
+
+      if (existing) return false;
+
+      const createdAt = payload.created_at || new Date().toISOString();
+      const createdAtEpoch = parseInt(payload.created_at_epoch || '0', 10);
+
+      ensureSessionExists(db, msid, payload.project, createdAt, createdAtEpoch);
+
+      db.prepare(`
+        INSERT INTO session_summaries
+          (memory_session_id, project, request, investigated, learned, completed,
+           next_steps, files_read, files_edited, notes, prompt_number,
+           discovery_tokens, merged_into_project, created_at, created_at_epoch,
+           origin_device_id, origin_local_id, sync_rev)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(...[
+        msid, payload.project || null,
+        payload.request || null,
+        payload.investigated || null,
+        payload.learned || null,
+        payload.completed || null,
+        payload.next_steps || null,
+        payload.files_read || null,
+        payload.files_edited || null,
+        payload.notes || null,
+        null,  // prompt_number
+        0,     // discovery_tokens
+        payload.merged_into_project || null,
+        createdAt, createdAtEpoch,
+        originDeviceId,
+        originLocalId,
+        body.entity_rev || '1'
+      ].map(toSqlValue));
+      return true;
+    }
+
+    async function pullAndApply() {
+      const db = openDb();
+      try {
+        let cursor = getCursor(db);
+        let totalApplied = 0;
+        let pages = 0;
+
+        while (pages < 500) {
+          const url = `${HUB_URL}/v1/sync/changes?since=${cursor}&limit=${PAGE_LIMIT}`;
+          const resp = await fetch(url, {
+            headers: {
+              'Authorization': `Bearer ${SYNC_TOKEN}`,
+              'X-User-Id': USER_ID,
+              'X-Device-Id': DEVICE_ID,
+            },
+          });
+
+          if (!resp.ok) {
+            console.error(`Synchub returned ${resp.status}: ${(await resp.text()).slice(0, 200)}`);
+            break;
+          }
+
+          const data = await resp.json();
+          const ops = data.ops || [];
+          if (ops.length === 0) break;
+
+          let applied = 0;
+          const maxSeq = Math.max(...ops.map(o => parseInt(o.seq, 10)));
+
+          db.exec('BEGIN');
+          try {
+            for (const op of ops) {
+              if (applySummaryOp(db, op)) applied++;
+            }
+            setCursor(db, String(maxSeq));
+            db.exec('COMMIT');
+          } catch (txErr) {
+            db.exec('ROLLBACK');
+            throw txErr;
+          }
+
+          cursor = String(maxSeq);
+          totalApplied += applied;
+          pages++;
+
+          if (ops.length < PAGE_LIMIT) break;
+        }
+
+        if (pages > 0) {
+          console.log(`[sync-pull] Processed ${pages} pages, applied ${totalApplied} summaries, cursor=${cursor}`);
+        }
+      } finally {
+        db.close();
+      }
+    }
+
+    function fixOrphanedSummaries() {
+      const db = openDb();
+      try {
+        const orphans = db.prepare(`
+          SELECT ss.memory_session_id, ss.project, ss.created_at, ss.created_at_epoch
+          FROM session_summaries ss
+          LEFT JOIN sdk_sessions s ON ss.memory_session_id = s.memory_session_id
+          WHERE s.memory_session_id IS NULL AND ss.origin_device_id = 'summary-generator'
+        `).all();
+        if (orphans.length > 0) {
+          db.exec('BEGIN');
+          for (const o of orphans) {
+            ensureSessionExists(db, o.memory_session_id, o.project, o.created_at, o.created_at_epoch);
+          }
+          db.exec('COMMIT');
+          console.log(`[sync-pull] Fixed ${orphans.length} orphaned summary sessions`);
+        }
+      } finally {
+        db.close();
+      }
+    }
+
+    async function loop() {
+      console.log(`[sync-pull] Starting (poll=${POLL_INTERVAL}ms, hub=${HUB_URL}, db=${DB_PATH})`);
+
+      // Initial delay to let dashboard start first
+      await new Promise(r => setTimeout(r, 30000));
+
+      // Fix any orphaned summaries from previous runs
+      try { fixOrphanedSummaries(); } catch (e) { console.error(`[sync-pull] fixOrphanedSummaries: ${e.message}`); }
+
+      while (true) {
+        try {
+          await pullAndApply();
+        } catch (err) {
+          console.error(`[sync-pull] Error: ${err.message}`);
+        }
+        await new Promise(r => setTimeout(r, POLL_INTERVAL));
+      }
+    }
+
+    loop();

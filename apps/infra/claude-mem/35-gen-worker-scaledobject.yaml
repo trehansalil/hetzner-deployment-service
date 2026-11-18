@@ -1,0 +1,44 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: claude-mem-gen-worker
+  namespace: infra
+spec:
+  scaleTargetRef:
+    name: claude-mem-gen-worker
+  minReplicaCount: 1
+  maxReplicaCount: 5
+  pollingInterval: 15
+  cooldownPeriod: 300
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 60
+          policies:
+            - type: Pods
+              value: 2
+              periodSeconds: 60
+        scaleUp:
+          stabilizationWindowSeconds: 0
+          policies:
+            - type: Pods
+              value: 2
+              periodSeconds: 30
+  triggers:
+    - type: redis
+      metadata:
+        address: redis.infra.svc.cluster.local:6379
+        listName: claude_mem_37700:server_beta_generate_event:wait
+        listLength: "5"
+        activationListLength: "1"
+      authenticationRef:
+        name: redis-auth
+    - type: redis
+      metadata:
+        address: redis.infra.svc.cluster.local:6379
+        listName: claude_mem_37700:server_beta_generate_summary:wait
+        listLength: "5"
+        activationListLength: "1"
+      authenticationRef:
+        name: redis-auth

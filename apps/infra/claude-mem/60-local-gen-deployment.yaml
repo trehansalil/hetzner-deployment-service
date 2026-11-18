@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: claude-mem-local-gen
+  namespace: infra
+  labels:
+    app: claude-mem-local-gen
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: claude-mem-local-gen
+  template:
+    metadata:
+      labels:
+        app: claude-mem-local-gen
+    spec:
+      containers:
+        - name: server-beta
+          image: ghcr.io/trehansalil/claude-mem:13.12.4-fix1
+          imagePullPolicy: Always
+          command: ["bun", "/opt/claude-mem/scripts/server-service.cjs"]
+          ports:
+            - containerPort: 37877
+              protocol: TCP
+          env:
+            - name: CLAUDE_MEM_DATA_DIR
+              value: /data
+            - name: CLAUDE_MEM_SERVER_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  key: DATABASE_URL
+                  name: claude-mem-server-beta
+            - name: CLAUDE_MEM_SERVER_HOST
+              value: "0.0.0.0"
+            - name: CLAUDE_MEM_QUEUE_ENGINE
+              value: bullmq
+            - name: CLAUDE_MEM_REDIS_URL
+              value: redis://redis:6379
+            - name: CLAUDE_MEM_WORKER_PORT
+              value: "37700"
+            - name: CLAUDE_MEM_LOG_LEVEL
+              value: INFO
+            - name: CLAUDE_MEM_GENERATION_DISABLED
+              value: "true"
+            - name: CLAUDE_MEM_MODE
+              value: code
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: config
+              mountPath: /data/settings.json
+              subPath: settings.json
+              readOnly: true
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: config
+          configMap:
+            name: claude-mem-server-beta-config

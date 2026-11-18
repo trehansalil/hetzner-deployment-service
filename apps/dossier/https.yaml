@@ -1,0 +1,36 @@
+# TLS for dossier at https://career.saliltrehan.com (served by dossier-gateway).
+#
+# DNS-01 via the Hetzner webhook (cert-manager-webhook-hetzner HelmChart in
+# kube-system): the name points at a tailnet IP, so HTTP-01 cannot work.
+# Secret `hetzner` in cert-manager holds the Hetzner API token.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-dns
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: trehansalil@yahoo.in
+    privateKeySecretRef:
+      name: letsencrypt-dns-account-key
+    solvers:
+      - dns01:
+          webhook:
+            solverName: hetzner
+            groupName: acme.hetzner.com
+            config:
+              tokenSecretKeyRef:
+                name: hetzner
+                key: token
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: career-tls
+  namespace: career
+spec:
+  secretName: career-tls
+  dnsNames: [career.saliltrehan.com]
+  issuerRef:
+    kind: ClusterIssuer
+    name: letsencrypt-dns

@@ -1,0 +1,21 @@
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: claude-mem-ipallow
+  namespace: infra
+spec:
+  ipAllowList:
+    sourceRange:
+    - 122.161.48.0/21
+    - 89.167.109.165/32
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: claude-mem-strip-origin
+  namespace: infra
+spec:
+  headers:
+    customRequestHeaders:
+      Origin: ''
+

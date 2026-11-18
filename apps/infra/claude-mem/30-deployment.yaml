@@ -1,0 +1,172 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: claude-mem
+  namespace: infra
+  labels:
+    app: claude-mem
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: claude-mem
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/restartedAt: "2026-09-22T17:34:36Z"
+      labels:
+        app: claude-mem
+    spec:
+      initContainers:
+        - name: inject-sync-settings
+          image: node:22-slim
+          command:
+            - sh
+            - -c
+            - |
+              node -e "
+              const fs = require('fs');
+              const settings = JSON.parse(fs.readFileSync('/config/settings.json', 'utf8'));
+              settings.CLAUDE_MEM_CLOUD_SYNC_HUB_URL = 'http://synchub-service:3001';
+              settings.CLAUDE_MEM_CLOUD_SYNC_TOKEN = process.env.SYNC_TOKEN;
+              settings.CLAUDE_MEM_CLOUD_SYNC_USER_ID = 'saliltrehan';
+              settings.CLAUDE_MEM_CLOUD_SYNC_DEVICE_ID = 'dashboard-viewer';
+              settings.CLAUDE_MEM_CLOUD_SYNC_URL = 'http://localhost:1/noop';
+              fs.writeFileSync('/data/settings.json', JSON.stringify(settings, null, 2));
+              console.log('Injected cloud sync settings into /data/settings.json');
+              "
+          env:
+            - name: SYNC_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  key: SYNC_TOKEN
+                  name: claude-mem-sync-token
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: config
+              mountPath: /config
+              readOnly: true
+        - name: copy-scripts
+          image: ghcr.io/trehansalil/claude-mem:13.11.0-fix1
+          command:
+            - sh
+            - -c
+            - cp -a /opt/claude-mem/scripts/. /patched/ && ls -la /patched/
+          volumeMounts:
+            - name: patched-scripts
+              mountPath: /patched
+        - name: patch-worker
+          image: node:22-slim
+          command:
+            - sh
+            - -c
+            - node /patch/apply-patch.js /patched/worker-service.cjs /patched/worker-service.patched.cjs && node --check /patched/worker-service.patched.cjs && mv /patched/worker-service.patched.cjs /patched/worker-service.cjs && chmod 755 /patched/worker-service.cjs && echo PATCH_OK
+          volumeMounts:
+            - name: patched-scripts
+              mountPath: /patched
+            - name: worker-patch
+              mountPath: /patch
+              readOnly: true
+      containers:
+        - name: claude-mem
+          image: ghcr.io/trehansalil/claude-mem:13.11.0-fix1
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 37700
+          env:
+            - name: CLAUDE_MEM_DATA_DIR
+              value: /data
+            - name: CMEM_PRO_ORIGIN
+              value: "http://localhost:1"
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 1750Mi
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 37700
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 4
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 37700
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: chroma-vol
+              mountPath: /data/chroma
+            - name: creds
+              mountPath: /root/.claude/.credentials.json
+              subPath: .credentials.json
+              readOnly: true
+            - name: patched-scripts
+              mountPath: /opt/claude-mem/scripts
+        - name: sync-pull
+          image: node:22-slim
+          command: ["node", "/scripts/sync-pull-sidecar.js"]
+          env:
+            - name: SYNC_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  key: SYNC_TOKEN
+                  name: claude-mem-sync-token
+            - name: HUB_URL
+              value: "http://synchub-service:3001"
+            - name: USER_ID
+              value: "saliltrehan"
+            - name: DEVICE_ID
+              value: "dashboard-viewer"
+            - name: DB_PATH
+              value: "/data/claude-mem.db"
+            - name: POLL_INTERVAL
+              value: "300000"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: sync-pull-script
+              mountPath: /scripts
+              readOnly: true
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: claude-mem-data
+        - name: chroma-vol
+          hostPath:
+            path: /mnt/HC_Volume_106759881/chroma
+            type: Directory
+        - name: config
+          configMap:
+            name: claude-mem-config
+        - name: creds
+          secret:
+            secretName: claude-mem-creds
+        - name: sync-pull-script
+          configMap:
+            name: claude-mem-sync-pull-script
+        - name: patched-scripts
+          emptyDir: {}
+        - name: worker-patch
+          configMap:
+            name: claude-mem-worker-patch

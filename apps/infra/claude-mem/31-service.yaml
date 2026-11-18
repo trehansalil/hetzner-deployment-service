@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: claude-mem
+  namespace: infra
+  labels:
+    app: claude-mem
+spec:
+  type: ClusterIP
+  selector:
+    app: claude-mem
+  ports:
+    - name: http
+      port: 37700
+      targetPort: 37700
+      protocol: TCP

@@ -1,0 +1,261 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: claude-mem-summary-generator-script
+  namespace: infra
+data:
+  summary-generator.js: |
+    #!/usr/bin/env node
+    const { Pool } = require('pg');
+    const crypto = require('crypto');
+
+    const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+    const PROJECT_ID = process.env.PROJECT_ID;
+    const AZURE_API_KEY = process.env.AZURE_OPENAI_KEY;
+    const AZURE_ENDPOINT = process.env.AZURE_ENDPOINT || 'https://techlotus-openai-api.openai.azure.com';
+    const AZURE_DEPLOYMENT = process.env.AZURE_DEPLOYMENT || 'gpt-5.4-mini';
+    const API_VERSION = '2025-01-01-preview';
+    const DEVICE_ID = 'summary-generator';
+    const MAX_OBS_PER_SESSION = 50;
+    const BATCH_SIZE = parseInt(process.env.BATCH_SIZE || '10', 10);
+    const DRY_RUN = process.env.DRY_RUN === 'true';
+
+    if (!PROJECT_ID) { console.error('PROJECT_ID required'); process.exit(1); }
+    if (!AZURE_API_KEY && !DRY_RUN) { console.error('AZURE_OPENAI_KEY required'); process.exit(1); }
+
+    function jsonSortedStringify(obj) {
+      if (obj === null || typeof obj !== 'object') return JSON.stringify(obj);
+      if (Array.isArray(obj)) return '[' + obj.map(jsonSortedStringify).join(',') + ']';
+      const keys = Object.keys(obj).sort();
+      return '{' + keys.map(k => JSON.stringify(k) + ':' + jsonSortedStringify(obj[k])).join(',') + '}';
+    }
+
+    function sha256Base64Url(data) {
+      return crypto.createHash('sha256').update(data).digest('base64url');
+    }
+
+    function computeEntityId(kind, deviceId, localId) {
+      const canonical = jsonSortedStringify(["cmem-doc-id-v1", "device", kind, deviceId, localId]);
+      return `${kind}:${sha256Base64Url(canonical)}`;
+    }
+
+    async function getEpoch() {
+      const r = await pool.query("SELECT value FROM sync_state WHERE key = 'epoch'");
+      return r.rows[0]?.value || '1';
+    }
+
+    async function findSessionsNeedingSummaries() {
+      const result = await pool.query(`
+        SELECT s.id as server_session_id,
+               s.content_session_id,
+               s.metadata->>'project' as project,
+               COUNT(o.id) as obs_count,
+               MIN(o.created_at) as first_obs,
+               MAX(o.created_at) as last_obs
+        FROM server_sessions s
+        JOIN observations o ON o.server_session_id = s.id
+        WHERE o.project_id = $1
+          AND s.content_session_id IS NOT NULL
+          AND s.ended_at IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM sync_ops so
+            WHERE so.kind = 'summary'
+              AND so.origin_device_id = $2
+              AND so.body::jsonb->'payload'->>'memory_session_id' = s.content_session_id
+          )
+        GROUP BY s.id, s.content_session_id, s.metadata->>'project'
+        HAVING COUNT(o.id) >= 3
+          AND MAX(o.created_at) < now() - interval '60 minutes'
+        ORDER BY MAX(o.created_at) DESC
+        LIMIT $3
+      `, [PROJECT_ID, DEVICE_ID, BATCH_SIZE]);
+      return result.rows;
+    }
+
+    async function getSessionObservations(serverSessionId) {
+      const result = await pool.query(`
+        SELECT o.content, o.kind, o.metadata, o.created_at
+        FROM observations o
+        WHERE o.server_session_id = $1
+          AND o.project_id = $2
+        ORDER BY o.created_at ASC
+        LIMIT $3
+      `, [serverSessionId, PROJECT_ID, MAX_OBS_PER_SESSION]);
+      return result.rows;
+    }
+
+    function buildObservationText(obs) {
+      const meta = obs.metadata || {};
+      const title = meta.title || '';
+      const narrative = meta.narrative || obs.content || '';
+      const kind = obs.kind || 'observation';
+      const time = new Date(obs.created_at).toISOString().slice(0, 16);
+      return `[${time}] (${kind}) ${title}\n${narrative}`.trim();
+    }
+
+    const SYSTEM_PROMPT = `You summarize developer coding sessions. Your summaries are read by the developer in future sessions to recall what happened.
+
+    CRITICAL RULES:
+    - Write from the developer's perspective, as if describing the session to a colleague.
+    - Focus on OUTCOMES: what was learned, fixed, built, decided, or discovered.
+    - NEVER mention internal tooling mechanics: no tool names (Read, Bash, ToolSearch, Grep, etc.), no MCP servers, no API call details, no file-reading operations, no "the agent did X."
+    - NEVER describe HOW information was gathered. Only describe WHAT was found.
+    - If the session was about searching past work or reviewing history, summarize the actual findings, not the search process.
+    - If the session was about debugging, describe the root cause and fix, not the steps taken to find it.
+    - Use concrete technical language: name the actual systems, files, bugs, and features involved.
+
+    BAD example: "A ToolSearch query was issued to find MCP tools. The registry returned matches for search tools."
+    GOOD example: "Searched past sessions; found that context injection was broken because observations had non-standard concept tags. The fix involved retagging 105K observations and constraining the gen-worker's concept vocabulary."`;
+
+    async function generateSummary(observations) {
+      const obsText = observations.map(buildObservationText).join('\n\n---\n\n');
+
+      const userPrompt = `Summarize this coding session as a JSON object with these fields:
+
+    - "request": What task or goal the developer was working on (1-2 sentences)
+    - "investigated": What areas, systems, or code were examined and why (1-2 sentences, or null if nothing was explored)
+    - "learned": Key discoveries, root causes found, or insights gained (1-2 sentences, or null if nothing new was learned)
+    - "completed": What was actually accomplished or changed (1-2 sentences)
+    - "next_steps": What remains to be done or follow-up items (1-2 sentences, or null)
+    - "notes": Any important context like blockers, risks, or decisions made (1 sentence, or null)
+
+    Respond with ONLY the JSON object, no markdown fences.
+
+    Session observations:
+    ${obsText}`;
+
+      const url = `${AZURE_ENDPOINT}/openai/deployments/${AZURE_DEPLOYMENT}/chat/completions?api-version=${API_VERSION}`;
+
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'api-key': AZURE_API_KEY,
+        },
+        body: JSON.stringify({
+          messages: [
+            { role: 'system', content: SYSTEM_PROMPT },
+            { role: 'user', content: userPrompt },
+          ],
+          max_completion_tokens: 800,
+          temperature: 0.3,
+        }),
+      });
+
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`Azure API ${response.status}: ${text}`);
+      }
+
+      const data = await response.json();
+      const content = data.choices?.[0]?.message?.content?.trim();
+      if (!content) throw new Error('Empty response from Azure');
+
+      try {
+        return JSON.parse(content);
+      } catch {
+        const match = content.match(/\{[\s\S]*\}/);
+        if (match) return JSON.parse(match[0]);
+        throw new Error(`Could not parse LLM response as JSON: ${content.slice(0, 200)}`);
+      }
+    }
+
+    async function insertSummaryAsSyncOp(session, summary, localId) {
+      const epoch = await getEpoch();
+      const createdAtEpoch = String(Math.floor(new Date(session.last_obs).getTime()));
+      const entityId = computeEntityId('summary', DEVICE_ID, localId);
+
+      const payload = {
+        memory_session_id: session.content_session_id,
+        project: session.project || PROJECT_ID,
+        request: summary.request || null,
+        investigated: summary.investigated || null,
+        learned: summary.learned || null,
+        completed: summary.completed || null,
+        next_steps: summary.next_steps || null,
+        files_read: null,
+        files_edited: null,
+        notes: summary.notes || null,
+        prompt_number: null,
+        discovery_tokens: "0",
+        merged_into_project: null,
+        created_at: new Date(session.last_obs).toISOString(),
+        created_at_epoch: createdAtEpoch,
+      };
+
+      const bodyObj = {
+        body_schema_version: 1,
+        deleted: false,
+        deleted_at: null,
+        entity_rev: '1',
+        id: entityId,
+        kind: 'summary',
+        mutation: null,
+        origin_device_id: DEVICE_ID,
+        origin_local_id: localId,
+        payload,
+        payload_schema_version: 2,
+        payload_sha256: sha256Base64Url(jsonSortedStringify(payload)),
+      };
+
+      const bodyStr = jsonSortedStringify(bodyObj);
+      const opSha = sha256Base64Url(bodyStr);
+
+      await pool.query(
+        `INSERT INTO sync_ops (epoch, entity_id, kind, origin_device_id, origin_local_id, entity_rev, body, operation_sha256)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [epoch, entityId, 'summary', DEVICE_ID, localId, '1', bodyStr, opSha]
+      );
+
+      return entityId;
+    }
+
+    async function main() {
+      console.log(`Summary generator starting (batch=${BATCH_SIZE}, dry_run=${DRY_RUN})`);
+
+      const sessions = await findSessionsNeedingSummaries();
+      console.log(`Found ${sessions.length} sessions needing summaries`);
+
+      if (sessions.length === 0) {
+        console.log('Nothing to do');
+        await pool.end();
+        return;
+      }
+
+      let generated = 0;
+      let failed = 0;
+
+      for (const session of sessions) {
+        // origin_local_id must be an unsigned base-10 string (clients quarantine
+        // anything else, e.g. the old "<ms>-<n>" form). ms*1000+n stays < 2^53.
+        const localId = String(Date.now() * 1000 + generated);
+        try {
+          const observations = await getSessionObservations(session.server_session_id);
+          console.log(`Session ${session.content_session_id.slice(0, 8)}... (${observations.length} obs, ${session.first_obs.toISOString().slice(0, 10)} to ${session.last_obs.toISOString().slice(0, 10)})`);
+
+          if (DRY_RUN) {
+            console.log('  [dry run] Would generate summary');
+            generated++;
+            continue;
+          }
+
+          const summary = await generateSummary(observations);
+          console.log(`  Generated: "${(summary.request || '').slice(0, 80)}..."`);
+
+          const entityId = await insertSummaryAsSyncOp(session, summary, localId);
+          console.log(`  Inserted sync_op: ${entityId}`);
+          generated++;
+        } catch (err) {
+          console.error(`  FAILED for ${session.content_session_id.slice(0, 8)}...: ${err.message}`);
+          failed++;
+        }
+      }
+
+      console.log(`Done: ${generated} generated, ${failed} failed`);
+      await pool.end();
+    }
+
+    main().catch(err => {
+      console.error('Fatal:', err);
+      process.exit(1);
+    });

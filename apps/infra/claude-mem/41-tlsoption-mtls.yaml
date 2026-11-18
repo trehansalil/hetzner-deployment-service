@@ -1,0 +1,27 @@
+# Mutual-TLS for the public ingress.
+#
+# WHY: the worker's /api/* surface (the one the MCP client uses) has NO
+# application-layer authentication — CLAUDE_MEM_API_KEY is never read by the
+# worker, and the only authenticated surface is /v1/* (the separate
+# server-beta product the normal client does not use). Exposing /api/* on a
+# raw public ingress would be an unauthenticated, mutating, internet-facing
+# memory store (incl. /api/admin/shutdown, /api/memory/save, /api/import).
+#
+# Auth therefore lives at the TLS transport layer: traefik requires a client
+# certificate signed by our private CA. The laptop's socat presents that
+# client cert; verification is transparent to the (header-less) client.
+#
+# The CA bundle lives in Secret claude-mem-mtls-ca (key: tls.ca), created
+# out-of-band from /root/claude-mem-mtls/ca.crt. It is NOT in this repo.
+apiVersion: traefik.io/v1alpha1
+kind: TLSOption
+metadata:
+  name: claude-mem-mtls
+  namespace: infra
+  labels:
+    app: claude-mem
+spec:
+  clientAuth:
+    secretNames:
+      - claude-mem-mtls-ca
+    clientAuthType: RequireAndVerifyClientCert

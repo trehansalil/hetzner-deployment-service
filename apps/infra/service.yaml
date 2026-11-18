@@ -146,3 +146,33 @@ spec:
     - name: http
       port: 3000
       targetPort: 3000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    purpose: Stable ClusterIP VIP for postgres, for clients that cannot resolve cluster
+      DNS -- notably synchub.service, which runs on the host (systemd, not in the
+      cluster) and whose resolver has no cluster DNS. The governing Service "postgres"
+      is headless (ClusterIP=None) and returns the POD ip, so any client that resolves
+      it once at startup is stranded when postgres-0 is rescheduled. A ClusterIP is
+      stable for the life of this object and kube-proxy retargets it to whatever pod
+      currently matches the selector. Do not make this headless and do not point the
+      StatefulSet's serviceName at it.
+  name: postgres-stable
+  namespace: infra
+spec:
+  internalTrafficPolicy: Cluster
+  ipFamilies:
+  - IPv4
+  ipFamilyPolicy: SingleStack
+  ports:
+  - name: postgres
+    port: 5432
+    protocol: TCP
+    targetPort: 5432
+  selector:
+    app: postgres
+  sessionAffinity: None
+  type: ClusterIP
+

@@ -1,0 +1,41 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: claude-mem-local-gen
+  namespace: infra
+  labels:
+    app: claude-mem-local-gen
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    traefik.ingress.kubernetes.io/router.middlewares: infra-claude-mem-ipallow@kubernetescrd,infra-claude-mem-strip-origin@kubernetescrd
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - mem-local.saliltrehan.com
+      secretName: claude-mem-local-gen-tls
+  rules:
+    - host: mem-local.saliltrehan.com
+      http:
+        paths:
+          - path: /v1/sync
+            pathType: Prefix
+            backend:
+              service:
+                name: synchub-service
+                port:
+                  number: 3001
+          - path: /v1
+            pathType: Prefix
+            backend:
+              service:
+                name: claude-mem-local-gen
+                port:
+                  number: 37877
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: claude-mem
+                port:
+                  number: 37700

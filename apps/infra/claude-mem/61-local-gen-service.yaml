@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: claude-mem-local-gen
+  namespace: infra
+  labels:
+    app: claude-mem-local-gen
+spec:
+  type: ClusterIP
+  selector:
+    app: claude-mem-local-gen
+  ports:
+    - name: http
+      port: 37877
+      targetPort: 37877
+      protocol: TCP

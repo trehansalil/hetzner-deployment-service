@@ -1,0 +1,66 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: claude-mem-summary-generator
+  namespace: infra
+spec:
+  schedule: "*/30 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 600
+      template:
+        spec:
+          restartPolicy: Never
+          initContainers:
+          - name: install-deps
+            image: node:22-slim
+            command: ["sh", "-c", "npm install --prefix /work pg"]
+            volumeMounts:
+            - name: work
+              mountPath: /work
+          containers:
+          - name: summary-generator
+            image: node:22-slim
+            command: ["sh", "-c", "NODE_PATH=/work/node_modules node /scripts/summary-generator.js"]
+            env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  key: DATABASE_URL
+                  name: claude-mem-server-beta
+            - name: PROJECT_ID
+              value: "c88bc727-5fd6-47f8-9046-59617e40d8f5"
+            - name: AZURE_OPENAI_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: AZURE_OPENAI_KEY
+                  name: claude-mem-azure-keys
+            - name: AZURE_ENDPOINT
+              value: "https://venki-test-azureopenai.openai.azure.com"
+            - name: AZURE_DEPLOYMENT
+              value: "gpt-4.1"
+            - name: BATCH_SIZE
+              value: "10"
+            resources:
+              limits:
+                cpu: 200m
+                memory: 128Mi
+              requests:
+                cpu: 50m
+                memory: 64Mi
+            volumeMounts:
+            - name: script
+              mountPath: /scripts
+              readOnly: true
+            - name: work
+              mountPath: /work
+          volumes:
+          - name: script
+            configMap:
+              name: claude-mem-summary-generator-script
+          - name: work
+            emptyDir: {}

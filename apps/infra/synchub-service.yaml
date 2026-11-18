@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: synchub-service
+  namespace: infra
+spec:
+  clusterIP: 10.43.170.116
+  clusterIPs:
+  - 10.43.170.116
+  internalTrafficPolicy: Cluster
+  ipFamilies:
+  - IPv4
+  ipFamilyPolicy: SingleStack
+  ports:
+  - port: 3001
+    protocol: TCP
+    targetPort: 3001
+  sessionAffinity: None
+  type: ClusterIP
+
+---
+# Host-run SyncHub (systemd synchub.service on the node, port 3001); selector-less Service + manual Endpoints.
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: synchub-service
+  namespace: infra
+subsets:
+  - addresses:
+      - ip: 89.167.109.165
+    ports:
+      - port: 3001

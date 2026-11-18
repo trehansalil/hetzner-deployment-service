@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: claude-mem-server-beta-config
+  namespace: infra
+data:
+  settings.json: |
+    {
+      "CLAUDE_MEM_QUEUE_ENGINE": "bullmq",
+      "CLAUDE_MEM_REDIS_URL": "redis://redis:6379",
+      "CLAUDE_MEM_QUEUE_REDIS_PREFIX": "claude_mem_37700",
+      "CLAUDE_MEM_WORKER_PORT": "37700",
+      "CLAUDE_MEM_DATA_DIR": "/data",
+      "CLAUDE_MEM_LOG_LEVEL": "DEBUG",
+      "CLAUDE_MEM_RUNTIME": "server-beta",
+      "CLAUDE_MEM_PROVIDER": "claude",
+      "CLAUDE_MEM_CLAUDE_AUTH_METHOD": "subscription",
+      "CLAUDE_MEM_AUTH_MODE": "api-key",
+      "CLAUDE_MEM_MODE": "code"
+    }

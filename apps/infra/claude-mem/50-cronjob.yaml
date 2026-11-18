@@ -1,0 +1,62 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: claude-mem-backup
+  namespace: infra
+  labels:
+    app: claude-mem
+spec:
+  schedule: "0 3 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: claude-mem
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: backup
+              image: alpine:3.20
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -eu
+                  apk add --no-cache sqlite
+                  TS="$(date +%Y%m%d-%H%M%S)"
+                  DEST="/backup/${TS}"
+                  mkdir -p "${DEST}"
+                  echo "Backing up SQLite DB to ${DEST}/claude-mem.db"
+                  sqlite3 /data/claude-mem.db ".backup '${DEST}/claude-mem.db'"
+                  echo "Pruning to the latest 14 dated backups"
+                  cd /backup
+                  ls -1d */ 2>/dev/null | sort | head -n -14 | while read -r old; do
+                    echo "Removing old backup ${old}"
+                    rm -rf "${old}"
+                  done
+                  echo "Backup complete: ${DEST}"
+              volumeMounts:
+                - name: data
+                  mountPath: /data
+                  readOnly: true
+                - name: backup
+                  mountPath: /backup
+                - name: chroma-vol
+                  mountPath: /data/chroma
+                  readOnly: true
+          volumes:
+            - name: data
+              persistentVolumeClaim:
+                claimName: claude-mem-data
+            - name: backup
+              hostPath:
+                path: /mnt/HC_Volume_106759881/backups
+                type: DirectoryOrCreate
+            - name: chroma-vol
+              hostPath:
+                path: /mnt/HC_Volume_106759881/chroma
+                type: Directory

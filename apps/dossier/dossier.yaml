@@ -1,0 +1,110 @@
+# dossier: job-search assistant (https://github.com/AienTech/dossier).
+# Namespace `career`. Database: dedicated `dossier` role + db in infra's Postgres.
+# Secret `dossier-secrets` (DOSSIER_PASSWORD hash, DOSSIER_SECRET, DATABASE_URL)
+# is created out of band, never committed.
+#
+# Exposure: public, through Traefik (ingress.yaml) at https://career.saliltrehan.com.
+# Cert: see https.yaml (DNS-01 through the Hetzner webhook).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: dossier-data
+  namespace: career
+  labels: { app: dossier }
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dossier-config
+  namespace: career
+  labels: { app: dossier }
+data:
+  TZ: "Asia/Kolkata"
+  DOSSIER_TELEMETRY: "off"
+  DOSSIER_PUBLIC_URL: "https://career.saliltrehan.com"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dossier
+  namespace: career
+  labels: { app: dossier }
+spec:
+  replicas: 1
+  # RWO volume: stop the old pod before starting the new one.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: { app: dossier }
+  template:
+    metadata:
+      labels: { app: dossier }
+    spec:
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000   # `node` in the image
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: dossier
+          image: ghcr.io/aientech/dossier:v1.10.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { name: http, containerPort: 3000 }
+          envFrom:
+            - configMapRef: { name: dossier-config }
+            - secretRef: { name: dossier-secrets }
+          readinessProbe:
+            httpGet: { path: /api/health, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /api/health, port: http }
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 4
+          startupProbe:
+            httpGet: { path: /api/health, port: http }
+            periodSeconds: 5
+            failureThreshold: 60   # migrations + seed run before the server starts
+          resources:
+            requests: { cpu: 50m, memory: 256Mi }
+            limits: { memory: 1Gi }   # Chromium prints the PDFs
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+            - { name: shm, mountPath: /dev/shm }
+            - { name: next-cache, mountPath: /app/.next/cache }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: dossier-data }
+        # Chromium needs more than the 64Mi default /dev/shm.
+        - name: shm
+          emptyDir: { medium: Memory, sizeLimit: 256Mi }
+        - name: next-cache
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dossier
+  namespace: career
+  labels: { app: dossier }
+spec:
+  type: ClusterIP
+  selector: { app: dossier }
+  ports:
+    - { name: http, port: 3000, targetPort: http }
+---

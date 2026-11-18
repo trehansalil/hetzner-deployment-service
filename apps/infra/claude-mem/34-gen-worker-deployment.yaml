@@ -1,0 +1,207 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: claude-mem-gen-worker
+  name: claude-mem-gen-worker
+  namespace: infra
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 1
+  selector:
+    matchLabels:
+      app: claude-mem-gen-worker
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/restartedAt: "2026-11-09T12:50:03Z"
+      labels:
+        app: claude-mem-gen-worker
+    spec:
+      containers:
+      - command:
+        - bun
+        - /patched/scripts/server-service.cjs
+        - worker
+        - start
+        env:
+        - name: CLAUDE_MEM_DATA_DIR
+          value: /data
+        - name: CLAUDE_MEM_SERVER_DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              key: DATABASE_URL
+              name: claude-mem-server-beta
+        - name: CLAUDE_MEM_QUEUE_ENGINE
+          value: bullmq
+        - name: CLAUDE_MEM_REDIS_URL
+          value: redis://redis:6379
+        - name: CLAUDE_MEM_WORKER_PORT
+          value: "37700"
+        - name: CLAUDE_MEM_LOG_LEVEL
+          value: DEBUG
+        - name: CLAUDE_MEM_SERVER_PROVIDER
+          value: openrouter
+        - name: CLAUDE_MEM_SERVER_MODEL
+          value: gpt-4.1
+        - name: OPENROUTER_API_KEY
+          valueFrom:
+            secretKeyRef:
+              key: AZURE_OPENAI_KEY
+              name: claude-mem-azure-keys
+        - name: CLAUDE_MEM_OPENROUTER_API_KEY
+          valueFrom:
+            secretKeyRef:
+              key: AZURE_OPENAI_KEY
+              name: claude-mem-azure-keys
+        - name: CLAUDE_MEM_MODE
+          value: code
+        image: ghcr.io/trehansalil/claude-mem:13.12.4-fix1
+        imagePullPolicy: Always
+        name: gen-worker
+        resources:
+          limits:
+            cpu: "1"
+            memory: 512Mi
+          requests:
+            cpu: 50m
+            memory: 64Mi
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /data
+          name: data
+        - mountPath: /data/settings.json
+          name: config
+          readOnly: true
+          subPath: settings.json
+        - mountPath: /patched
+          name: patched-scripts
+      dnsPolicy: ClusterFirst
+      initContainers:
+      - args:
+        - |
+          mkdir -p /patched/scripts
+          cp /opt/claude-mem/scripts/server-service.cjs /patched/scripts/server-service.cjs
+          set -e
+          F=/patched/scripts/server-service.cjs
+          # Patch 1 (loadMode injection) dropped: 13.12.4-fix1 calls loadMode itself.
+          # Patch 2: Redirect OpenRouter URL to Azure OpenAI
+          sed -i 's#https://openrouter.ai/api/v1/chat/completions#https://venki-test-azureopenai.openai.azure.com/openai/deployments/gpt-4.1/chat/completions?api-version=2025-01-01-preview#g' $F
+          grep -q 'venki-test-azureopenai.openai.azure.com' $F || { echo 'Patch 2 FAILED: OpenRouter URL anchor not found'; exit 1; }
+          echo 'Patch 2 applied: Azure URL'
+          # Patch 3: Fallback model when primary returns empty content (logger/arg names captured, not hardcoded)
+          export FALLBACK_MODEL="Mistral-Medium-3.5-128B"
+          cat > /tmp/patch3.js <<'EOF'
+          const fs = require('fs');
+          const F = '/patched/scripts/server-service.cjs';
+          const FB = process.env.FALLBACK_MODEL;
+          let code = fs.readFileSync(F, 'utf8');
+          const tre = /o\|\|(\w+)\.warn\("SDK","OpenRouter returned empty content",\{provider:"openrouter",model:this\.model\}\)/;
+          const cre = /await this\.postChatCompletion\((\w+),(\w+)\)/;
+          const tm = code.match(tre);
+          const cm = code.match(cre);
+          if (!tm || !cm) {
+            console.error('Patch 3 FAILED: anchor not found (logger match=' + !!tm + ', postChatCompletion call match=' + !!cm + ')');
+            process.exit(1);
+          }
+          const L = tm[1], A = cm[1], B = cm[2];
+          const replacement = 'if(!o){' + L + '.warn("SDK","OpenRouter primary model returned empty content, trying fallback",{provider:"openrouter",model:this.model,fallback:"' + FB + '"});let _fm=this.model;this.model="' + FB + '";try{let _fs=await this.postChatCompletion(' + A + ',' + B + ');if(_fs.ok){let _fa=await _fs.json();o=_fa.choices?.[0]?.message?.content?.trim()??"";o&&' + L + '.info("SDK","Fallback model returned content",{fallback:"' + FB + '"})}}catch(_fe){' + L + '.warn("SDK","Fallback model failed",{error:String(_fe)})}this.model=_fm}';
+          code = code.replace(tre, () => replacement);
+          fs.writeFileSync(F, code);
+          console.log('Patch 3 applied: fallback to ' + FB + ' (logger=' + L + ', args=' + A + ',' + B + ')');
+          EOF
+          node /tmp/patch3.js
+          # Patch 4: Constrain observation concepts to mode vocabulary
+          node -e "
+          const fs = require('fs');
+          let code = fs.readFileSync('/patched/scripts/server-service.cjs', 'utf8');
+          const target = '\"  <concepts><concept>...</concept></concepts>\"';
+          const replacement = '\"  <concepts><concept>[ how-it-works | why-it-exists | what-changed | problem-solution | gotcha | pattern | trade-off ]</concept></concepts>\"';
+          if (code.includes(target)) {
+            code = code.replace(target, replacement);
+            fs.writeFileSync('/patched/scripts/server-service.cjs', code);
+            console.log('Patch 4 applied: constrained concepts to mode vocabulary');
+          } else {
+            console.error('Patch 4 FAILED: target string not found');
+            process.exit(1);
+          }
+          "
+          # Patch 5: Change auth from Bearer to api-key header for Azure
+          node -e "
+          const fs = require('fs');
+          let code = fs.readFileSync('/patched/scripts/server-service.cjs', 'utf8');
+          const target = 'Authorization:\x60Bearer \x24{this.apiKey}\x60';
+          const replacement = '\"api-key\":this.apiKey';
+          if (code.includes(target)) {
+            code = code.replace(target, replacement);
+            fs.writeFileSync('/patched/scripts/server-service.cjs', code);
+            console.log('Patch 5 applied: Azure api-key auth header');
+          } else {
+            console.error('Patch 5 FAILED: target string not found');
+            process.exit(1);
+          }
+          "
+          # Patch 6: Change max_tokens to max_completion_tokens for Azure
+          node -e "
+          const fs = require('fs');
+          let code = fs.readFileSync('/patched/scripts/server-service.cjs', 'utf8');
+          if (code.includes('max_tokens:')) {
+            code = code.replace(/max_tokens:/g, 'max_completion_tokens:');
+            fs.writeFileSync('/patched/scripts/server-service.cjs', code);
+            console.log('Patch 6 applied: max_completion_tokens for Azure');
+          } else {
+            console.error('Patch 6 FAILED: max_tokens not found');
+            process.exit(1);
+          }
+          "
+          # Patch 7: Improve observation prompt (loaded from ConfigMap)
+          node /patches/patch7.js | tee /tmp/p7.out
+          grep -q 'Patch 7 applied' /tmp/p7.out || { echo 'Patch 7 FAILED: anchor not found'; exit 1; }
+          # Copy modes directory
+          cp -r /opt/claude-mem/modes /patched/modes
+          echo "patched server-service.cjs for Azure OpenAI + concept constraint + prompt quality"
+        command:
+        - sh
+        - -c
+        env:
+        - name: CLAUDE_MEM_MODE
+          value: code
+        - name: CLAUDE_MEM_SERVER_PROVIDER
+          value: openrouter
+        - name: CLAUDE_MEM_SERVER_MODEL
+          value: gpt-4.1
+        image: ghcr.io/trehansalil/claude-mem:13.12.4-fix1
+        imagePullPolicy: IfNotPresent
+        name: patch-script
+        resources: {}
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /patched
+          name: patched-scripts
+        - mountPath: /patches
+          name: patch7
+          readOnly: true
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - emptyDir: {}
+        name: data
+      - configMap:
+          defaultMode: 420
+          name: claude-mem-server-beta-config
+        name: config
+      - emptyDir: {}
+        name: patched-scripts
+      - configMap:
+          defaultMode: 420
+          name: claude-mem-gen-worker-patch7
+        name: patch7

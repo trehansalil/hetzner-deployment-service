@@ -1,0 +1,55 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  labels:
+    app: claude-mem
+  name: claude-mem-tls
+  namespace: infra
+spec:
+  dnsNames:
+  - mem.saliltrehan.com
+  issuerRef:
+    group: cert-manager.io
+    kind: ClusterIssuer
+    name: letsencrypt-prod
+  secretName: claude-mem-tls
+  usages:
+  - digital signature
+  - key encipherment
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  labels:
+    app: claude-mem-local-gen
+  name: claude-mem-local-gen-tls
+  namespace: infra
+spec:
+  dnsNames:
+  - mem-local.saliltrehan.com
+  issuerRef:
+    group: cert-manager.io
+    kind: ClusterIssuer
+    name: letsencrypt-prod
+  secretName: claude-mem-local-gen-tls
+  usages:
+  - digital signature
+  - key encipherment
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: doop-mcp-tls
+  namespace: infra
+spec:
+  dnsNames:
+  - doop-mcp.saliltrehan.com
+  issuerRef:
+    group: cert-manager.io
+    kind: ClusterIssuer
+    name: letsencrypt-prod
+  secretName: doop-mcp-tls
+  usages:
+  - digital signature
+  - key encipherment
+

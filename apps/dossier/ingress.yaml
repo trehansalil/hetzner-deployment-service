@@ -1,0 +1,38 @@
+# Public exposure of dossier at https://career.saliltrehan.com through Traefik.
+# DNS: career.saliltrehan.com A -> Hetzner server IP.
+# TLS: secret `career-tls`, issued by Certificate career-tls (https.yaml, DNS-01),
+# so no cert-manager annotation here.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: redirect-https
+  namespace: career
+spec:
+  redirectScheme:
+    scheme: https
+    permanent: true
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: dossier
+  namespace: career
+  annotations:
+    traefik.ingress.kubernetes.io/router.middlewares: career-redirect-https@kubernetescrd
+spec:
+  ingressClassName: traefik
+  tls:
+  - hosts:
+    - career.saliltrehan.com
+    secretName: career-tls
+  rules:
+  - host: career.saliltrehan.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: dossier
+            port:
+              number: 3000

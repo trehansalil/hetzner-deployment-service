@@ -33,6 +33,14 @@ cluster-init:
 # Left unset it stays the fail-closed RFC-5737 placeholder (Adminer unreachable until set).
 ADMIN_CIDR ?= 203.0.113.0/24
 
+.PHONY: deploy-infra-extras
+# Stacks adopted from live on 2026-11-18 (claude-mem, doop, synchub). Not run by CI;
+# `kubectl diff` was clean against live when committed. Secrets are out-of-band.
+deploy-infra-extras:
+	$(KUBECTL) apply -f apps/infra/claude-mem/ -n $(INFRA_NS)
+	$(KUBECTL) apply -f apps/infra/doop.yaml -n $(INFRA_NS)
+	$(KUBECTL) apply -f apps/infra/synchub-service.yaml -n $(INFRA_NS)
+
 .PHONY: deploy-infra
 deploy-infra:
 	$(KUBECTL) apply -f apps/infra/namespace.yaml

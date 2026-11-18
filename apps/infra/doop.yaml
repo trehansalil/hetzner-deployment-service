@@ -1,0 +1,85 @@
+# Doop (https://github.com/trehansalil/doop, fork of kgoedecke/doop) — infra ns.
+# Image built by .github/workflows/build-image.yml on deploy/hetzner.
+# Secrets (not in this file): doop-db (DATABASE_URL), doop-s3 (MinIO user),
+# doop-app (BETTER_AUTH_SECRET, SECRETS_ENCRYPTION_KEYS), paper-mcp-oauth (Google OAuth client, shared with Paper).
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: doop, namespace: infra, labels: {app: doop}}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: doop}}
+  template:
+    metadata: {labels: {app: doop}}
+    spec:
+      securityContext: {runAsNonRoot: true, runAsUser: 1000, fsGroup: 1000}
+      containers:
+      - name: doop
+        image: ghcr.io/trehansalil/doop:sha-2c4ff7b
+        ports: [{containerPort: 4400}]
+        env:
+        - {name: HOME, value: /tmp}
+        - {name: BETTER_AUTH_URL, value: "https://doop-mcp.saliltrehan.com"}
+        - {name: TRUSTED_ORIGINS, value: "https://doop-mcp.saliltrehan.com"}
+        # lock sign-in to one person (full-address entry; see server/auth.ts)
+        - {name: SIGNUP_EMAIL_DOMAINS, value: "trehansalil1@gmail.com"}
+        - {name: DATABASE_URL, valueFrom: {secretKeyRef: {name: doop-db, key: DATABASE_URL}}}
+        - {name: BETTER_AUTH_SECRET, valueFrom: {secretKeyRef: {name: doop-app, key: BETTER_AUTH_SECRET}}}
+        - {name: SECRETS_ENCRYPTION_KEYS, valueFrom: {secretKeyRef: {name: doop-app, key: SECRETS_ENCRYPTION_KEYS}}}
+        - {name: GOOGLE_CLIENT_ID, valueFrom: {secretKeyRef: {name: paper-mcp-oauth, key: client-id}}}
+        - {name: GOOGLE_CLIENT_SECRET, valueFrom: {secretKeyRef: {name: paper-mcp-oauth, key: client-secret}}}
+        # object storage: MinIO in this namespace
+        - {name: ENDPOINT, value: "http://minio.infra.svc.cluster.local:9000"}
+        - {name: REGION, value: us-east-1}
+        - {name: S3_PATH_STYLE, value: "true"}
+        - {name: BUCKET, value: doop-assets}
+        - {name: ACCESS_KEY_ID, valueFrom: {secretKeyRef: {name: doop-s3, key: access-key}}}
+        - {name: SECRET_ACCESS_KEY, valueFrom: {secretKeyRef: {name: doop-s3, key: secret-key}}}
+        # export_frame -> presigned links (same pattern as Paper's export shim)
+        - {name: EXPORT_BUCKET, value: doop-exports}
+        - {name: EXPORT_PUBLIC_URL, value: "https://doop-mcp.saliltrehan.com"}
+        - {name: EXPORT_LINK_TTL_SECONDS, value: "86400"}   # link lifetime; default 24h if unset
+        readinessProbe: {httpGet: {path: /healthz, port: 4400}, initialDelaySeconds: 20, periodSeconds: 10, failureThreshold: 6}
+        livenessProbe: {httpGet: {path: /healthz, port: 4400}, initialDelaySeconds: 90, periodSeconds: 30, failureThreshold: 6}
+        resources:
+          requests: {cpu: 100m, memory: 256Mi}
+          limits: {cpu: "1", memory: 1Gi}
+        securityContext: {allowPrivilegeEscalation: false}
+        volumeMounts: [{name: tmp, mountPath: /tmp}]
+      volumes: [{name: tmp, emptyDir: {}}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: doop, namespace: infra}
+spec:
+  selector: {app: doop}
+  ports: [{port: 4400, targetPort: 4400}]
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: doop-mcp
+  namespace: infra
+  annotations: {cert-manager.io/cluster-issuer: letsencrypt-prod}
+spec:
+  ingressClassName: traefik
+  rules:
+  - host: doop-mcp.saliltrehan.com
+    http:
+      paths:
+      - {path: /, pathType: Prefix, backend: {service: {name: doop, port: {number: 4400}}}}
+  tls:
+  - {hosts: [doop-mcp.saliltrehan.com], secretName: doop-mcp-tls}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata: {name: doop-exports, namespace: infra}
+spec:
+  ingressClassName: traefik
+  rules:
+  - host: doop-mcp.saliltrehan.com
+    http:
+      paths:
+      - {path: /doop-exports, pathType: Prefix, backend: {service: {name: minio, port: {number: 9000}}}}
+  tls:
+  - {hosts: [doop-mcp.saliltrehan.com], secretName: doop-mcp-tls}
