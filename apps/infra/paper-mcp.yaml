@@ -245,9 +245,24 @@ data:
         def log_message(self, *a):
             pass
 
+        def read_chunked(self):
+            """Decode a Transfer-Encoding: chunked request body (Gemini sends these)."""
+            out = []
+            while True:
+                size = int(self.rfile.readline().split(b";")[0].strip() or b"0", 16)
+                if size == 0:
+                    while self.rfile.readline().strip():  # trailers
+                        pass
+                    return b"".join(out)
+                out.append(self.rfile.read(size))
+                self.rfile.readline()  # CRLF after chunk
+
         def handle_any(self):
-            n = int(self.headers.get("Content-Length") or 0)
-            body = self.rfile.read(n) if n else b""
+            if "chunked" in (self.headers.get("Transfer-Encoding") or "").lower():
+                body = self.read_chunked()
+            else:
+                n = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(n) if n else b""
             hdrs = {k: v for k, v in self.headers.items() if k.lower() not in HOP and k.lower() != "content-length"}
             hdrs["Content-Length"] = str(len(body))
             c = http.client.HTTPConnection(*UPSTREAM, timeout=3600)
