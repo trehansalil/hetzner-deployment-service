@@ -165,6 +165,8 @@ jobs:
           # keep serving through the migration validation window — they are pruned at
           # decommission, not here. See apps/infra/MIGRATION.md Phase 5.
           kubectl apply -f apps/infra/cronjob-pod-cleanup.yaml -n infra
+          # Paper MCP (secrets out-of-band, image node-local; see file header).
+          kubectl apply -f apps/infra/paper-mcp.yaml -n infra
         env:
           # Optional GitHub Actions variable; empty -> fail-closed placeholder above.
           ADMIN_CIDR: ${{ vars.ADMIN_CIDR }}
