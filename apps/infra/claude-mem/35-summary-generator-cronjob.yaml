@@ -34,15 +34,15 @@ spec:
                   name: claude-mem-server-beta
             - name: PROJECT_ID
               value: "c88bc727-5fd6-47f8-9046-59617e40d8f5"
-            - name: AZURE_OPENAI_KEY
+            - name: LLM_API_KEY
               valueFrom:
                 secretKeyRef:
-                  key: AZURE_OPENAI_KEY
-                  name: claude-mem-azure-keys
-            - name: AZURE_ENDPOINT
-              value: "https://venki-test-azureopenai.openai.azure.com"
-            - name: AZURE_DEPLOYMENT
-              value: "gpt-4.1"
+                  key: GROQ_API_KEY
+                  name: claude-mem-groq-key
+            - name: LLM_URL
+              value: "https://api.groq.com/openai/v1/chat/completions"
+            - name: LLM_MODEL
+              value: "openai/gpt-oss-20b"
             - name: BATCH_SIZE
               value: "10"
             resources:

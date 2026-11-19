@@ -1,0 +1,104 @@
+# Drip-feeds orphaned 'queued' observation_generation_jobs back into BullMQ.
+# After the 2026-11-10 Azure outage, ~5.9k jobs exhausted their retries and were
+# dropped from Redis while Postgres still says 'queued'. Re-adding them all at once
+# would exceed Groq free-tier limits (1000 req/day, 8000 tokens/min per model), so
+# each run (2 jobs per 5 min) adds REFEED_BATCH jobs (newest first) only when the queue is near empty.
+# Suspend or delete this CronJob once `queued` rows reach 0.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: claude-mem-backlog-refeed-script
+  namespace: infra
+data:
+  refeed.js: |
+    const { Pool } = require('pg');
+    const { Queue } = require('bullmq');
+
+    const BATCH = parseInt(process.env.REFEED_BATCH || '5', 10);
+    const MAX_INFLIGHT = parseInt(process.env.MAX_INFLIGHT || '2', 10);
+    const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+    const connection = { host: 'redis', port: 6379, maxRetriesPerRequest: null };
+    const prefix = 'claude_mem_37700';
+
+    (async () => {
+      const q = new Queue('server_beta_generate_event', { connection, prefix });
+      const c = await q.getJobCounts('wait', 'active', 'delayed');
+      const inflight = c.wait + c.active + c.delayed;
+      console.log('queue', JSON.stringify(c));
+      if (inflight >= MAX_INFLIGHT) { console.log('queue busy, skipping'); process.exit(0); }
+
+      const { rows } = await pool.query(
+        `SELECT id, payload FROM observation_generation_jobs
+          WHERE status='queued' AND source_type='agent_event'
+          ORDER BY created_at DESC LIMIT $1`, [BATCH]);
+      console.log('remaining queued agent_event rows (this batch of):', rows.length);
+      for (const r of rows) {
+        const jobId = `refeed_${r.id.slice(0, 8)}_${Date.now()}`;
+        await pool.query(
+          `UPDATE observation_generation_jobs
+              SET attempts=0, last_error=NULL, bullmq_job_id=$2, next_attempt_at=NULL, updated_at=now()
+            WHERE id=$1`, [r.id, jobId]);
+        await q.add('observation_generate_for_event',
+          { ...r.payload, generation_job_id: r.id }, { jobId, attempts: 0 });
+        console.log('enqueued', jobId);
+      }
+      await q.close();
+      await pool.end();
+      process.exit(0);
+    })().catch(e => { console.error(e); process.exit(1); });
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: claude-mem-backlog-refeed
+  namespace: infra
+spec:
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 300
+      template:
+        spec:
+          restartPolicy: Never
+          initContainers:
+          - name: install-deps
+            image: node:22-slim
+            command: ["sh", "-c", "npm install --prefix /work pg bullmq ioredis"]
+            volumeMounts:
+            - name: work
+              mountPath: /work
+          containers:
+          - name: refeed
+            image: node:22-slim
+            command: ["sh", "-c", "NODE_PATH=/work/node_modules node /scripts/refeed.js"]
+            env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  key: DATABASE_URL
+                  name: claude-mem-server-beta
+            - name: REFEED_BATCH
+              value: "2"
+            resources:
+              limits:
+                cpu: 200m
+                memory: 192Mi
+              requests:
+                cpu: 50m
+                memory: 64Mi
+            volumeMounts:
+            - name: script
+              mountPath: /scripts
+              readOnly: true
+            - name: work
+              mountPath: /work
+          volumes:
+          - name: script
+            configMap:
+              name: claude-mem-backlog-refeed-script
+          - name: work
+            emptyDir: {}
