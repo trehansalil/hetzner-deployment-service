@@ -91,10 +91,11 @@ spec:
           set -e
           F=/patched/scripts/server-service.cjs
           # Patch 1 (loadMode injection) dropped: 13.12.4-fix1 calls loadMode itself.
-          # Patch 2: Redirect OpenRouter URL to Groq (OpenAI-compatible, free tier)
-          sed -i 's#https://openrouter.ai/api/v1/chat/completions#https://api.groq.com/openai/v1/chat/completions#g' $F
-          grep -q 'api.groq.com/openai/v1/chat/completions' $F || { echo 'Patch 2 FAILED: OpenRouter URL anchor not found'; exit 1; }
-          echo 'Patch 2 applied: Groq URL'
+          # Patch 2: Redirect OpenRouter URL to the in-cluster llm-router (38-llm-router.yaml):
+          # Mac (gemma-4-26b-a4b via Tailscale) -> Groq fallback -> 503 so the job stays queued.
+          sed -i 's#https://openrouter.ai/api/v1/chat/completions#http://llm-router.infra.svc.cluster.local:8080/v1/chat/completions#g' $F
+          grep -q 'llm-router.infra.svc.cluster.local:8080/v1/chat/completions' $F || { echo 'Patch 2 FAILED: OpenRouter URL anchor not found'; exit 1; }
+          echo 'Patch 2 applied: llm-router URL'
           # Patch 3: Fallback model when primary returns empty content (logger/arg names captured, not hardcoded)
           export FALLBACK_MODEL="openai/gpt-oss-20b"
           cat > /tmp/patch3.js <<'EOF'
@@ -151,7 +152,7 @@ spec:
           grep -q 'Patch 7 applied' /tmp/p7.out || { echo 'Patch 7 FAILED: anchor not found'; exit 1; }
           # Copy modes directory
           cp -r /opt/claude-mem/modes /patched/modes
-          echo "patched server-service.cjs for Groq + concept constraint + prompt quality"
+          echo "patched server-service.cjs for llm-router + concept constraint + prompt quality"
         command:
         - sh
         - -c
