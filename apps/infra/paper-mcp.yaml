@@ -89,6 +89,8 @@ data:
     import os
     import re
     import sys
+    import threading
+    import time
     import urllib.parse
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -230,13 +232,132 @@ data:
         return json.dumps(o).encode() if rewrite_obj(o) else raw
 
 
-    def is_export_call(body):
+    def tool_calls(body):
+        """Return the list of tools/call params dicts in a JSON-RPC body."""
         try:
             o = json.loads(body)
         except Exception:
-            return False
+            return []
         objs = o if isinstance(o, list) else [o]
-        return any(isinstance(x, dict) and x.get("method") == "tools/call" and (x.get("params") or {}).get("name") in ("export", "export_combined_pdf") for x in objs)
+        return [x.get("params") or {} for x in objs if isinstance(x, dict) and x.get("method") == "tools/call"]
+
+
+    # ---- concurrency control + self-healing -------------------------------------
+    # Paper is one Electron renderer on software GL. Parallel exports/screenshots
+    # push it past its memory limit and kill the renderer, after which every call
+    # fails ("Could not find Paper"). So: run heavy calls one at a time, probe the
+    # renderer, let the pod liveness probe restart Paper when it is dead, and
+    # replay the last open_file afterwards.
+    HEAVY = {"export", "export_combined_pdf", "get_screenshot"}
+    HEAVY_SEM = threading.Semaphore(int(os.environ.get("HEAVY_CONCURRENCY", "1")))
+    HEALTH_DIR = os.environ.get("HEALTH_DIR", "/health")
+    PROBE_EVERY = 20
+    DEAD_MARKERS = ("could not find paper", "target closed", "frame was detached", "render frame was disposed")
+    _lock = threading.Lock()
+    _inflight = [0]
+    _state = {"sid": None, "last_open": None, "down": False}
+    _HDRS = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+
+
+    def _post(payload, sid=None, timeout=25):
+        h = dict(_HDRS)
+        if sid:
+            h["Mcp-Session-Id"] = sid
+        c = http.client.HTTPConnection(*UPSTREAM, timeout=timeout)
+        try:
+            c.request("POST", "/mcp", body=json.dumps(payload), headers=h)
+            r = c.getresponse()
+            raw = r.read().decode("utf-8", "replace")
+            return r.status, r.getheader("Mcp-Session-Id"), raw
+        finally:
+            c.close()
+
+
+    def _parse(raw):
+        for line in raw.split("\n"):
+            if line.startswith("data:"):
+                try:
+                    return json.loads(line[5:].strip())
+                except Exception:
+                    pass
+        try:
+            return json.loads(raw)
+        except Exception:
+            return None
+
+
+    def _is_dead(raw):
+        low = raw.lower()
+        return any(m in low for m in DEAD_MARKERS)
+
+
+    def _ensure_session():
+        if _state["sid"]:
+            return _state["sid"]
+        st, sid, raw = _post({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "paper-shim-health", "version": "1"}}})
+        if st != 200 or not sid:
+            raise RuntimeError("initialize %s" % st)
+        _post({"jsonrpc": "2.0", "method": "notifications/initialized"}, sid)
+        _state["sid"] = sid
+        return sid
+
+
+    def _call_tool(name, args):
+        """Returns (alive, parsed_response)."""
+        for attempt in (0, 1):
+            sid = _ensure_session()
+            st, _, raw = _post({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": name, "arguments": args}}, sid)
+            if st in (400, 404) and attempt == 0:  # stale session after a Paper restart
+                _state["sid"] = None
+                continue
+            if st >= 500 or _is_dead(raw):
+                return False, raw
+            return True, _parse(raw)
+        return False, None
+
+
+    def probe():
+        with _lock:
+            if _inflight[0] > 0:
+                return True  # a real call is running; don't compete with it
+        alive, _ = _call_tool("get_basic_info", {})
+        return alive
+
+
+    def replay_open_file():
+        p = _state["last_open"]
+        if not p:
+            return
+        try:
+            alive, resp = _call_tool("open_file", p.get("arguments") or {})
+            log("replayed open_file:", alive, str(resp)[:200])
+        except Exception as e:
+            log("replay open_file failed:", repr(e))
+
+
+    def health_loop():
+        os.makedirs(HEALTH_DIR, exist_ok=True)
+        ok_file = os.path.join(HEALTH_DIR, "ok")
+        time.sleep(PROBE_EVERY)
+        while True:
+            try:
+                ok = probe()
+            except Exception as e:
+                _state["sid"] = None
+                log("probe error:", repr(e))
+                ok = False
+            if ok:
+                if _state["down"]:
+                    log("paper recovered")
+                    _state["down"] = False
+                    replay_open_file()
+                with open(ok_file, "a"):
+                    os.utime(ok_file, None)
+            elif not _state["down"]:
+                log("paper unhealthy; liveness probe will restart it if this persists")
+                _state["down"] = True
+            time.sleep(PROBE_EVERY)
 
 
     class H(BaseHTTPRequestHandler):
@@ -265,13 +386,31 @@ data:
                 body = self.rfile.read(n) if n else b""
             hdrs = {k: v for k, v in self.headers.items() if k.lower() not in HOP and k.lower() != "content-length"}
             hdrs["Content-Length"] = str(len(body))
+            calls = tool_calls(body) if self.command == "POST" else []
+            heavy = any(p.get("name") in HEAVY for p in calls)
+            with _lock:
+                _inflight[0] += 1
+            if heavy:
+                HEAVY_SEM.acquire()
+            try:
+                self.forward(body, hdrs, calls)
+            finally:
+                if heavy:
+                    HEAVY_SEM.release()
+                with _lock:
+                    _inflight[0] -= 1
+
+        def forward(self, body, hdrs, calls):
             c = http.client.HTTPConnection(*UPSTREAM, timeout=3600)
             c.request(self.command, self.path, body=body, headers=hdrs)
             r = c.getresponse()
             rh = [(k, v) for k, v in r.getheaders() if k.lower() not in HOP and k.lower() != "content-length"]
             ctype = r.getheader("Content-Type") or ""
-            if self.command == "POST" and is_export_call(body):
+            names = [p.get("name") for p in calls]
+            if any(n in ("export", "export_combined_pdf") for n in names) or "open_file" in names:
                 data = r.read()
+                if "open_file" in names and r.status == 200 and not _is_dead(data.decode("utf-8", "replace")) and '"isError":true' not in data.decode("utf-8", "replace").replace(" ", ""):
+                    _state["last_open"] = next(p for p in calls if p.get("name") == "open_file")
                 try:
                     data = rewrite_body(data, ctype)
                 except Exception as e:
@@ -302,6 +441,7 @@ data:
 
     if __name__ == "__main__":
         log("export shim listening", LISTEN)
+        threading.Thread(target=health_loop, daemon=True).start()
         ThreadingHTTPServer(LISTEN, H).serve_forever()
 kind: ConfigMap
 metadata:
@@ -343,12 +483,12 @@ spec:
             command:
             - bash
             - -c
-            - exec 3<>/dev/tcp/127.0.0.1/29979
-          failureThreshold: 6
-          initialDelaySeconds: 60
-          periodSeconds: 20
+            - exec 3<>/dev/tcp/127.0.0.1/29979 && [ $(( $(date +%s) - $(stat -c %Y /health/ok) )) -lt 100 ]
+          failureThreshold: 3
+          initialDelaySeconds: 150
+          periodSeconds: 30
           successThreshold: 1
-          timeoutSeconds: 3
+          timeoutSeconds: 5
         name: paper
         ports:
         - containerPort: 29979
@@ -366,11 +506,11 @@ spec:
           timeoutSeconds: 3
         resources:
           limits:
-            cpu: '1'
-            memory: 1Gi
+            cpu: '2'
+            memory: 1536Mi
           requests:
             cpu: 100m
-            memory: 512Mi
+            memory: 768Mi
         securityContext:
           allowPrivilegeEscalation: false
           runAsNonRoot: true
@@ -384,6 +524,9 @@ spec:
           name: shm
         - mountPath: /tmp
           name: tmp
+        - mountPath: /health
+          name: health
+          readOnly: true
       - args:
         - --
         - http://127.0.0.1:8082
@@ -466,6 +609,8 @@ spec:
         - mountPath: /app
           name: shim-code
           readOnly: true
+        - mountPath: /health
+          name: health
         - mountPath: /home/paperuser
           name: paper-home
           readOnly: true
@@ -503,8 +648,11 @@ spec:
           claimName: paper-desktop-data
       - emptyDir:
           medium: Memory
-          sizeLimit: 256Mi
+          sizeLimit: 192Mi
         name: shm
+      - emptyDir:
+          sizeLimit: 1Mi
+        name: health
       - emptyDir: {}
         name: tmp
       - configMap:
