@@ -39,8 +39,9 @@ spec:
                 secretKeyRef:
                   key: GROQ_API_KEY
                   name: claude-mem-groq-key
+            # llm-router (38-llm-router.yaml): Mac -> Groq -> 503. It overrides LLM_MODEL/LLM_API_KEY per backend.
             - name: LLM_URL
-              value: "https://api.groq.com/openai/v1/chat/completions"
+              value: "http://llm-router.infra.svc.cluster.local:8080/v1/chat/completions"
             - name: LLM_MODEL
               value: "openai/gpt-oss-20b"
             - name: BATCH_SIZE

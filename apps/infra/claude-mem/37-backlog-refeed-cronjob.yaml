@@ -1,7 +1,8 @@
 # Drip-feeds orphaned 'queued' observation_generation_jobs back into BullMQ.
 # After the 2026-11-10 Azure outage, ~5.9k jobs exhausted their retries and were
 # dropped from Redis while Postgres still says 'queued'. Re-adding them all at once
-# would exceed Groq free-tier limits (1000 req/day, 8000 tokens/min per model), so
+# would exceed Groq free-tier limits (1000 req/day, 8000 tokens/min per model) and swamp the
+# Mac (llm-router primary backend, ~7-15s per call, concurrency 2), so
 # each run (2 jobs per 5 min) adds REFEED_BATCH jobs (newest first) only when the queue is near empty.
 # Suspend or delete this CronJob once `queued` rows reach 0.
 apiVersion: v1

@@ -1,0 +1,197 @@
+# llm-router: one OpenAI-compatible endpoint in front of the LLM backends used by claude-mem.
+#   1. Mac mini (LM Studio over Tailscale)  -> google/gemma-4-26b-a4b   (no daily cap)
+#   2. Groq (free tier)                      -> openai/gpt-oss-120b      (used only if the Mac is down/empty)
+#   3. Neither available                     -> 503 + Retry-After, so the job stays queued and is retried
+#      (the gen-worker retries, and 37-backlog-refeed-cronjob re-adds jobs that exhaust retries).
+# Clients (gen-worker, summary-generator) point at http://llm-router.infra.svc.cluster.local:8080/v1/chat/completions
+# and may send any model name / API key: the router overrides the model per backend and holds the Groq key itself.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: claude-mem-llm-router-script
+  namespace: infra
+data:
+  router.js: |
+    const http = require('http');
+
+    const env = (k, d) => process.env[k] || d;
+    const MAC_URL = env('MAC_URL', 'http://100.106.50.6:1234/v1');
+    const MAC_MODEL = env('MAC_MODEL', 'google/gemma-4-26b-a4b');
+    const MAC_TIMEOUT_MS = parseInt(env('MAC_TIMEOUT_MS', '180000'), 10);
+    const MAC_MIN_TOKENS = parseInt(env('MAC_MIN_TOKENS', '2048'), 10); // reasoning tokens count against max_tokens
+    const MAC_CONCURRENCY = parseInt(env('MAC_CONCURRENCY', '2'), 10);
+    const GROQ_URL = env('GROQ_URL', 'https://api.groq.com/openai/v1/chat/completions');
+    const GROQ_MODEL = env('GROQ_MODEL', 'openai/gpt-oss-120b');
+    const GROQ_KEY = process.env.GROQ_API_KEY || '';
+    const GROQ_TIMEOUT_MS = parseInt(env('GROQ_TIMEOUT_MS', '60000'), 10);
+    const DOWN_COOLDOWN_MS = parseInt(env('DOWN_COOLDOWN_MS', '30000'), 10);
+    const PORT = parseInt(env('PORT', '8080'), 10);
+
+    const state = {
+      mac: { downUntil: 0, lastOk: 0, lastErr: '' },
+      groq: { downUntil: 0, lastOk: 0, lastErr: '' },
+      counts: { mac: 0, groq: 0, unavailable: 0 },
+    };
+    const log = (m, o) => console.log(JSON.stringify({ t: new Date().toISOString(), msg: m, ...o }));
+
+    // tiny semaphore so a slow Mac is not flooded
+    let macActive = 0; const macWaiters = [];
+    const macAcquire = () => new Promise(r => { if (macActive < MAC_CONCURRENCY) { macActive++; r(); } else macWaiters.push(r); });
+    const macRelease = () => { const n = macWaiters.shift(); if (n) n(); else macActive--; };
+
+    async function post(url, headers, body, timeoutMs) {
+      return fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers },
+        body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs) });
+    }
+    const contentOf = d => (d && d.choices && d.choices[0] && d.choices[0].message && d.choices[0].message.content || '').trim();
+
+    function macBody(b) {
+      const o = { ...b, model: MAC_MODEL, stream: false };
+      const want = b.max_completion_tokens || b.max_tokens || 0;
+      o.max_tokens = Math.max(want, MAC_MIN_TOKENS);
+      delete o.max_completion_tokens;
+      // LM Studio rejects json_object/text response_format without a schema
+      if (o.response_format && o.response_format.type !== 'json_schema') delete o.response_format;
+      return o;
+    }
+    function groqBody(b) {
+      const o = { ...b, model: GROQ_MODEL, stream: false };
+      if (o.max_tokens && !o.max_completion_tokens) { o.max_completion_tokens = o.max_tokens; }
+      delete o.max_tokens;
+      return o;
+    }
+
+    async function tryMac(body) {
+      if (Date.now() < state.mac.downUntil) return null;
+      await macAcquire();
+      try {
+        const r = await post(MAC_URL + '/chat/completions', {}, macBody(body), MAC_TIMEOUT_MS);
+        if (!r.ok) throw new Error('mac http ' + r.status + ' ' + (await r.text()).slice(0, 200));
+        const d = await r.json();
+        if (!contentOf(d)) throw new Error('mac returned empty content');
+        state.mac.lastOk = Date.now(); state.mac.lastErr = '';
+        return d;
+      } catch (e) {
+        state.mac.lastErr = String(e.message || e);
+        state.mac.downUntil = Date.now() + DOWN_COOLDOWN_MS;
+        log('mac failed, falling back', { err: state.mac.lastErr });
+        return null;
+      } finally { macRelease(); }
+    }
+
+    async function tryGroq(body) {
+      if (!GROQ_KEY || Date.now() < state.groq.downUntil) return { d: null, retryAfter: Math.ceil((state.groq.downUntil - Date.now()) / 1000) };
+      try {
+        const r = await post(GROQ_URL, { Authorization: 'Bearer ' + GROQ_KEY }, groqBody(body), GROQ_TIMEOUT_MS);
+        if (r.status === 429 || r.status >= 500) {
+          const ra = Math.min(Math.max(parseInt(r.headers.get('retry-after') || '60', 10) || 60, 5), 3600);
+          state.groq.downUntil = Date.now() + ra * 1000;
+          state.groq.lastErr = 'groq http ' + r.status;
+          log('groq unavailable', { status: r.status, retryAfter: ra });
+          return { d: null, retryAfter: ra };
+        }
+        if (!r.ok) throw new Error('groq http ' + r.status + ' ' + (await r.text()).slice(0, 200));
+        const d = await r.json();
+        state.groq.lastOk = Date.now(); state.groq.lastErr = '';
+        return { d };
+      } catch (e) {
+        state.groq.lastErr = String(e.message || e);
+        state.groq.downUntil = Date.now() + DOWN_COOLDOWN_MS;
+        log('groq failed', { err: state.groq.lastErr });
+        return { d: null, retryAfter: Math.ceil(DOWN_COOLDOWN_MS / 1000) };
+      }
+    }
+
+    // background probe: clear the Mac cooldown as soon as it is reachable again
+    setInterval(async () => {
+      if (Date.now() < state.mac.downUntil || state.mac.lastErr) {
+        try { const r = await fetch(MAC_URL + '/models', { signal: AbortSignal.timeout(5000) });
+          if (r.ok) { state.mac.downUntil = 0; state.mac.lastErr = ''; log('mac back online'); } } catch (_) {}
+      }
+    }, 15000).unref();
+
+    const send = (res, code, obj, extra) => { res.writeHead(code, { 'Content-Type': 'application/json', ...extra }); res.end(JSON.stringify(obj)); };
+
+    http.createServer(async (req, res) => {
+      if (req.method === 'GET' && (req.url === '/healthz' || req.url === '/')) return send(res, 200, { ok: true });
+      if (req.method === 'GET' && req.url === '/status') return send(res, 200, state);
+      const isChat = req.method === 'POST' && /\/chat\/completions$/.test(req.url.split('?')[0]);
+      if (!isChat) return send(res, 404, { error: { message: 'not found' } });
+      let raw = ''; for await (const c of req) raw += c;
+      let body; try { body = JSON.parse(raw); } catch (_) { return send(res, 400, { error: { message: 'invalid json' } }); }
+
+      let d = await tryMac(body);
+      if (d) { state.counts.mac++; return send(res, 200, d, { 'X-LLM-Backend': 'mac' }); }
+      const g = await tryGroq(body);
+      if (g.d) { state.counts.groq++; return send(res, 200, g.d, { 'X-LLM-Backend': 'groq' }); }
+      state.counts.unavailable++;
+      const ra = Math.max(g.retryAfter || 30, 15);
+      log('all backends unavailable', { retryAfter: ra });
+      send(res, 503, { error: { message: 'mac and groq unavailable; retry later', type: 'backend_unavailable' } }, { 'Retry-After': String(ra) });
+    }).listen(PORT, () => log('llm-router listening', { port: PORT, mac: MAC_URL, macModel: MAC_MODEL, groqModel: GROQ_MODEL }));
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-router
+  namespace: infra
+  labels:
+    app: llm-router
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: llm-router
+  template:
+    metadata:
+      labels:
+        app: llm-router
+    spec:
+      containers:
+      - name: llm-router
+        image: node:22-slim
+        command: ["node", "/app/router.js"]
+        env:
+        - name: MAC_URL
+          value: "http://100.106.50.6:1234/v1"
+        - name: MAC_MODEL
+          value: "google/gemma-4-26b-a4b"
+        - name: GROQ_MODEL
+          value: "openai/gpt-oss-120b"
+        - name: GROQ_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: claude-mem-groq-key
+              key: GROQ_API_KEY
+        ports:
+        - containerPort: 8080
+        readinessProbe:
+          httpGet: { path: /healthz, port: 8080 }
+          periodSeconds: 10
+        livenessProbe:
+          httpGet: { path: /healthz, port: 8080 }
+          initialDelaySeconds: 10
+          periodSeconds: 30
+        resources:
+          requests: { cpu: 20m, memory: 48Mi }
+          limits: { cpu: 200m, memory: 128Mi }
+        volumeMounts:
+        - name: script
+          mountPath: /app
+          readOnly: true
+      volumes:
+      - name: script
+        configMap:
+          name: claude-mem-llm-router-script
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-router
+  namespace: infra
+spec:
+  selector:
+    app: llm-router
+  ports:
+  - port: 8080
+    targetPort: 8080
